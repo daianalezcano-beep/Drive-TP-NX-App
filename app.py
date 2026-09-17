@@ -267,9 +267,18 @@ def render_script_tab(key, cfg):
         _refrescar_conteo(state, sheet_url, cfg["sheet"])
 
     if state.get("conteo"):
+        conteo = state["conteo"]
         cols = st.columns(5)
-        for col, (etiqueta, n) in zip(cols, state["conteo"].items()):
+        for col, (etiqueta, n) in zip(cols, conteo.items()):
             col.metric(etiqueta, n)
+
+        total = sum(conteo.values())
+        if total > 0:
+            avanzadas = total - conteo["Pendiente"]
+            st.progress(
+                avanzadas / total,
+                text=f"{avanzadas}/{total} procesadas",
+            )
     elif state.get("conteo_error"):
         st.error(f"No pude leer el Sheet: {state['conteo_error']}")
 
