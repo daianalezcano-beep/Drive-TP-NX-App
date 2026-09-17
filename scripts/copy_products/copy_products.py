@@ -62,15 +62,23 @@ VERSION_FECHA = "2026-09-01"
 # ── CONFIGURACIÓN — via variables de entorno (con default = valor original) ──
 import os
 
-MODO       = os.environ.get("TOURPLAN_MODO", "completo")    # "lectura" | "escritura" | "completo"
-EXCEL_PATH = os.environ.get("TOURPLAN_EXCEL_PATH", "/content/NEW_OPTION_input.xlsx")
-HOJA       = os.environ.get("TOURPLAN_HOJA", "PRODUCTOS")
+from common.user_config import (
+    CREDENTIALS_PATH as _CREDENTIALS_PATH_DEFAULT,
+    TOKEN_PATH as _TOKEN_PATH_DEFAULT,
+)
+
+MODO             = os.environ.get("TOURPLAN_MODO", "completo")    # "lectura" | "escritura" | "completo"
+SHEET_URL        = os.environ.get("TOURPLAN_SHEET_URL", "")
+HOJA             = os.environ.get("TOURPLAN_HOJA", "PRODUCTOS")
+CREDENTIALS_PATH = os.environ.get("TOURPLAN_CREDENTIALS_PATH", _CREDENTIALS_PATH_DEFAULT)
+TOKEN_PATH       = os.environ.get("TOURPLAN_TOKEN_PATH", _TOKEN_PATH_DEFAULT)
 
 USERNAME   = os.environ.get("TOURPLAN_USERNAME", "poner minusculas")
 PASSWORD   = os.environ.get("TOURPLAN_PASSWORD", "password")
 BASE_URL   = os.environ.get("TOURPLAN_BASE_URL", "https://tourplannx.eurotur.com.ar/tourplannx")
 
 SS_DIR     = os.environ.get("TOURPLAN_SS_DIR", "/content/screenshots")
+HEADLESS   = os.environ.get("TOURPLAN_HEADLESS", "0").strip() in ("1", "true", "True")
 
 # Multiplicador de tiempos de espera (sleeps y timeouts de WebDriverWait).
 # Producción por default — Tourplan responde más lento ahí que en Test.
@@ -86,9 +94,10 @@ print("🔧 Verificando entorno...\n")
 
 # 0.1 Paquetes Python
 _PIPS_NEEDED = {
-    "selenium":          "selenium",
-    "openpyxl":          "openpyxl",
-    "webdriver_manager": "webdriver-manager",
+    "selenium":            "selenium",
+    "webdriver_manager":   "webdriver-manager",
+    "gspread":             "gspread",
+    "google_auth_oauthlib": "google-auth-oauthlib",
 }
 _faltantes = [pkg for mod, pkg in _PIPS_NEEDED.items()
               if importlib.util.find_spec(mod) is None]
@@ -103,6 +112,8 @@ else:
 from common.chrome_bootstrap import find_or_prepare_chrome
 # 0.3 Botón Abortar de la app (ver common/abort.py)
 from common.abort import chequear_abort, AbortadoPorUsuario, ABORT_EXIT_CODE
+# 0.4 Google Sheets como cola de trabajo (ver common/sheets_client.py)
+from common.sheets_client import conectar_sheets, cargar_sheet, actualizar_fila_sheet
 
 CHROMIUM_BIN, ver_chrome = find_or_prepare_chrome()
 
@@ -116,7 +127,6 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
-import openpyxl
 
 os.makedirs(SS_DIR, exist_ok=True)
 
@@ -241,9 +251,11 @@ def crear_driver():
     import tempfile
 
     opts = Options()
-    # Sin --headless: esto corre en la PC de la persona (con pantalla), no en
-    # el contenedor sin pantalla de Colab. Ademas, varias empresas bloquean
-    # el modo headless de Chrome por politica de seguridad.
+    # Sin ventana visible solo si se pide explícitamente (TOURPLAN_HEADLESS,
+    # checkbox en Configuración) — por default corre con ventana real en la
+    # PC de la persona, a diferencia del contenedor sin pantalla de Colab.
+    if HEADLESS:
+        opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1704,1012")
@@ -849,25 +861,14 @@ def refresh_results_rows(driver):
     except TimeoutException:
         return []
 
-def load_excel(path):
-    wb = openpyxl.load_workbook(path)
-    ws = wb[HOJA]
-    headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
-    col_idx = {h: i + 1 for i, h in enumerate(headers) if h}
-    rows = []
-    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        if not any(row):
-            continue
-        d = dict(zip(headers, row))
-        d["__row_idx__"] = row_idx
-        rows.append(d)
-    print(f"Excel cargado: {len(rows)} fila(s) en '{HOJA}'")
-    return wb, rows, col_idx
+def load_sheet():
+    ws = conectar_sheets(SHEET_URL, HOJA, CREDENTIALS_PATH, TOKEN_PATH)
+    rows, columnas = cargar_sheet(ws)
+    print(f"Sheet cargado: {len(rows)} fila(s) en '{HOJA}'")
+    return ws, rows, columnas
 
-def update_estado(wb, row_idx, col_idx, estado, path):
-    ws = wb[HOJA]
-    ws.cell(row=row_idx, column=col_idx[COL_ESTADO]).value = estado
-    wb.save(path)
+def update_estado(ws, row_idx, columnas, estado):
+    actualizar_fila_sheet(ws, row_idx, columnas, {COL_ESTADO: estado})
 
 def _clave_origen(row):
     """Identidad del origen de una fila: mismo SUPPLIER_ORIGEN + SERVICE_TYPE
@@ -1011,15 +1012,15 @@ print("=" * 60)
 print(f"  NEW OPTION (Copy Product)  v{VERSION}  [{VERSION_FECHA}]  MODO={MODO}")
 print("=" * 60)
 
-if not os.path.exists(EXCEL_PATH):
-    raise FileNotFoundError(f"No encontré el Excel en {EXCEL_PATH} — subilo a /content/")
+if not SHEET_URL:
+    raise ValueError("No se indicó la URL del Google Sheet (TOURPLAN_SHEET_URL).")
 
-wb, rows, col_idx = load_excel(EXCEL_PATH)
+ws, rows, columnas = load_sheet()
 
-if COL_OPTION_CODE_DEST not in col_idx:
+if COL_OPTION_CODE_DEST not in columnas:
     raise ValueError(
-        f"Columna '{COL_OPTION_CODE_DEST}' no encontrada en el Excel.\n"
-        f"Columnas detectadas: {list(col_idx.keys())}"
+        f"Columna '{COL_OPTION_CODE_DEST}' no encontrada en el Sheet.\n"
+        f"Columnas detectadas: {columnas}"
     )
 
 pendientes = [r for r in rows
@@ -1068,7 +1069,7 @@ try:
                 ss(driver, f"fatal_row{row['__row_idx__']}")
 
             print(f"  Estado: {nuevo_estado}")
-            update_estado(wb, row["__row_idx__"], col_idx, nuevo_estado, EXCEL_PATH)
+            update_estado(ws, row["__row_idx__"], columnas, nuevo_estado)
             ya_posicionado = puede_encadenar
 
 except AbortadoPorUsuario:
@@ -1080,15 +1081,8 @@ finally:
     dur = int(time.time() - _t_inicio)
     m, s = divmod(dur, 60)
     print(f"\n🏁 Fin. Duración: {m}m {s:02d}s")
-    print(f"📄 Excel: {EXCEL_PATH}")
+    print(f"📄 Sheet: {SHEET_URL}")
     print(f"📂 Screenshots: {SS_DIR}")
 
 if _abortado:
     sys.exit(ABORT_EXIT_CODE)
-
-try:
-    from google.colab import files
-    files.download(EXCEL_PATH)
-    print("📥 Excel descargado.")
-except Exception:
-    pass

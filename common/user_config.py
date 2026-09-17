@@ -1,11 +1,16 @@
 """
 user_config.py — Configuración local por persona/PC de TP-NX-App.
 
-Guarda la URL default de Sheet por script (una entrada por key del
-dict SCRIPTS de app.py) y los paths de credenciales OAuth de Google,
-en ~/.tourplan-nx-app/ — FUERA del repo/carpeta compartida por todo el
-equipo. app.py y common/ viven en una carpeta de red única para todo
-el equipo; un config al lado del código (como config_store.py de TP
+Guarda, en ~/.tourplan-nx-app/config.json — FUERA del repo/carpeta
+compartida por todo el equipo —:
+  - "sheet_urls": la URL default de Sheet por script (una entrada por
+    key del dict SCRIPTS de app.py).
+  - "headless": si los scripts corren con la ventana de Chrome visible
+    (default, False) o sin ventana (True) — mismo campo que ya usa
+    config_store.py de TP Documentación.
+
+app.py y common/ viven en una carpeta de red única para todo el
+equipo; un config al lado del código (como config_store.py de TP
 Documentación, donde cada quien tiene su propia instalación completa)
 se pisaría entre personas acá. Mismo tipo de solución que ya usa
 run_app.bat para el venv (instalar fuera del repo por el límite de
@@ -25,21 +30,34 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 CREDENTIALS_PATH = os.path.join(CONFIG_DIR, "credentials.json")
 TOKEN_PATH = os.path.join(CONFIG_DIR, "token.json")
 
+VALORES_DEFAULT = {
+    "sheet_urls": {},
+    "headless": False,
+}
+
 
 def cargar():
-    """Devuelve {script_key: sheet_url} guardado en esta PC. Vacío si
-    todavía no se guardó nada desde la pantalla de Configuración."""
+    """Devuelve la config guardada en esta PC, completando con los
+    defaults cualquier clave que todavía no exista (por ejemplo, si se
+    suma un campo nuevo en una versión futura de la app)."""
     if not os.path.exists(CONFIG_PATH):
-        return {}
+        return {"sheet_urls": {}, "headless": False}
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        datos = json.load(f)
+    cfg = {"sheet_urls": {}, "headless": False}
+    cfg.update(datos)
+    return cfg
 
 
-def guardar(sheet_urls):
+def guardar(cfg):
     os.makedirs(CONFIG_DIR, exist_ok=True)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(sheet_urls, f, ensure_ascii=False, indent=2)
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
 def sheet_url_default(script_key):
-    return cargar().get(script_key, "")
+    return cargar().get("sheet_urls", {}).get(script_key, "")
+
+
+def headless_default():
+    return bool(cargar().get("headless", False))

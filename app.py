@@ -23,6 +23,7 @@ from pathlib import Path
 import streamlit as st
 
 from common.abort import ABORT_EXIT_CODE
+from common import user_config
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -195,7 +196,6 @@ def render_script_tab(key, cfg):
             "running": False,
             "finished": False,
             "log_lines": [],
-            "result_path": None,
             "returncode": None,
             "proc": None,
             "stop_file": None,
@@ -203,8 +203,13 @@ def render_script_tab(key, cfg):
         }
     state = st.session_state[state_key]
 
-    uploaded = st.file_uploader(
-        "Excel de entrada (.xlsx)", type=["xlsx"], key=f"upload_{key}", disabled=state["running"])
+    sheet_url = st.text_input(
+        "URL del Google Sheet",
+        value=user_config.sheet_url_default(key),
+        key=f"sheet_url_{key}",
+        disabled=state["running"],
+        help="Se precarga con la URL guardada en Configuración para este script, si hay una. Siempre editable.",
+    )
 
     col1, col2 = st.columns(2)
     with col1:
@@ -250,7 +255,7 @@ def render_script_tab(key, cfg):
     else:
         edicion_env = None
 
-    campos_completos = bool(uploaded and username and password and base_url)
+    campos_completos = bool(sheet_url and username and password and base_url)
 
     col_run, col_abort = st.columns(2)
     with col_run:
@@ -271,13 +276,10 @@ def render_script_tab(key, cfg):
                  "las filas restantes en PENDIENTE para retomar en otra corrida.",
         )
     if not campos_completos and not state["running"]:
-        st.caption("Completá Excel, usuario, password y URL para poder ejecutar.")
+        st.caption("Completá la URL del Sheet, usuario, password y URL de Tourplan para poder ejecutar.")
 
     if run_clicked:
         run_dir = Path(tempfile.mkdtemp(prefix=f"tourplan_{key}_"))
-        safe_name = Path(uploaded.name).name  # evita path traversal desde el nombre subido
-        excel_path = run_dir / safe_name
-        excel_path.write_bytes(uploaded.getbuffer())
         ss_dir = run_dir / "screenshots"
         ss_dir.mkdir(exist_ok=True)
         stop_file = run_dir / "ABORTAR.flag"
@@ -287,8 +289,11 @@ def render_script_tab(key, cfg):
             "TOURPLAN_USERNAME": username,
             "TOURPLAN_PASSWORD": password,
             "TOURPLAN_BASE_URL": base_url,
-            "TOURPLAN_EXCEL_PATH": str(excel_path),
+            "TOURPLAN_SHEET_URL": sheet_url,
             "TOURPLAN_HOJA": cfg["sheet"],
+            "TOURPLAN_CREDENTIALS_PATH": user_config.CREDENTIALS_PATH,
+            "TOURPLAN_TOKEN_PATH": user_config.TOKEN_PATH,
+            "TOURPLAN_HEADLESS": "1" if user_config.headless_default() else "0",
             "TOURPLAN_SS_DIR": str(ss_dir),
             "TOURPLAN_STOP_FILE": str(stop_file),
             "PYTHONPATH": str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
@@ -314,10 +319,8 @@ def render_script_tab(key, cfg):
             "running": True,
             "finished": False,
             "log_lines": [],
-            "result_path": None,
             "returncode": None,
             "proc": proc,
-            "excel_path": excel_path,
             "stop_file": stop_file,
             "abort_requested": False,
         })
@@ -344,19 +347,13 @@ def render_script_tab(key, cfg):
     if state["running"] and state["finished"]:
         state["running"] = False
         rc = state["returncode"]
-        excel_path = state.get("excel_path")
-        if excel_path and Path(excel_path).exists():
-            state["result_path"] = str(excel_path)
 
-        if rc == 0 and state["result_path"]:
-            st.success(f"Terminó OK (código de salida {rc}).")
-        elif rc == 0:
-            st.warning("El proceso terminó OK pero no encontré el Excel resultado.")
+        if rc == 0:
+            st.success(f"Terminó OK (código de salida {rc}). Revisá el resultado en el Sheet.")
         elif rc == ABORT_EXIT_CODE:
             st.info(
                 "⏸️ Abortado. Las filas que no llegó a procesar quedaron en PENDIENTE — "
-                "descargá el Excel para ver hasta dónde llegó y volvé a subirlo más adelante "
-                "para retomar."
+                "volvé a correr sobre el mismo Sheet más adelante para retomar."
             )
         else:
             st.error(
@@ -368,15 +365,51 @@ def render_script_tab(key, cfg):
         time.sleep(1)
         st.rerun()
 
-    if state.get("result_path") and os.path.exists(state["result_path"]):
-        with open(state["result_path"], "rb") as f:
-            st.download_button(
-                "Descargar Excel con el resultado",
-                data=f.read(),
-                file_name=Path(state["result_path"]).name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=f"download_{key}",
+
+def render_configuracion():
+    """Pantalla de Configuración: se completa una vez por PC. Guarda en
+    ~/.tourplan-nx-app/config.json (ver common/user_config.py) — nunca en
+    el repo compartido, para no pisarse entre personas."""
+    st.header("Configuración")
+    st.caption(
+        "Se guarda en esta computadora (no se sube al repositorio ni se comparte "
+        "con el resto del equipo)."
+    )
+
+    cfg = user_config.cargar()
+
+    with st.form("form_configuracion"):
+        headless = st.checkbox(
+            "Correr sin ventana de Chrome visible (headless)",
+            value=bool(cfg.get("headless", False)),
+            help="Destildado (default): se abre una ventana de Chrome real mientras "
+                 "corre cada script. Tildado: corre sin abrir ventana.",
+        )
+
+        st.subheader("URL de Sheet por script")
+        st.caption(
+            "Opcional — dejá vacío el que no uses. Se precarga al elegir ese script "
+            "para ejecutar, pero siempre se puede pegar otra URL puntual ahí."
+        )
+
+        sheet_urls_guardadas = cfg.get("sheet_urls", {})
+        nuevas_urls = {}
+        current_category = None
+        for key, script_cfg in SCRIPTS.items():
+            if script_cfg["category"] != current_category:
+                current_category = script_cfg["category"]
+                st.markdown(f"**{current_category}**")
+            nuevas_urls[key] = st.text_input(
+                script_cfg["label"],
+                value=sheet_urls_guardadas.get(key, ""),
+                key=f"cfg_sheet_url_{key}",
             )
+
+        guardado = st.form_submit_button("Guardar", type="primary", use_container_width=True)
+
+    if guardado:
+        user_config.guardar({"headless": headless, "sheet_urls": nuevas_urls})
+        st.success("Configuración guardada.")
 
 
 def render_sidebar_nav():
@@ -385,14 +418,26 @@ def render_sidebar_nav():
     del script elegido (esos widgets viven en el área principal, no acá)."""
     if "selected_script" not in st.session_state:
         st.session_state["selected_script"] = next(iter(SCRIPTS))
+    if "vista" not in st.session_state:
+        st.session_state["vista"] = "script"
 
+    if st.sidebar.button(
+        "⚙️ Configuración",
+        key="nav_configuracion",
+        type="primary" if st.session_state["vista"] == "config" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state["vista"] = "config"
+        st.rerun()
+
+    st.sidebar.divider()
     st.sidebar.title("Scripts")
     current_category = None
     for key, cfg in SCRIPTS.items():
         if cfg["category"] != current_category:
             current_category = cfg["category"]
             st.sidebar.markdown(f"**{current_category}**")
-        selected = st.session_state["selected_script"] == key
+        selected = st.session_state["vista"] == "script" and st.session_state["selected_script"] == key
         if st.sidebar.button(
             cfg["label"],
             key=f"nav_{key}",
@@ -400,6 +445,7 @@ def render_sidebar_nav():
             use_container_width=True,
         ):
             st.session_state["selected_script"] = key
+            st.session_state["vista"] = "script"
             st.rerun()
 
 
@@ -412,8 +458,11 @@ def main():
     )
 
     render_sidebar_nav()
-    selected_key = st.session_state["selected_script"]
-    render_script_tab(selected_key, SCRIPTS[selected_key])
+    if st.session_state["vista"] == "config":
+        render_configuracion()
+    else:
+        selected_key = st.session_state["selected_script"]
+        render_script_tab(selected_key, SCRIPTS[selected_key])
 
 
 if __name__ == "__main__":
