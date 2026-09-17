@@ -42,10 +42,11 @@ _t_inicio = time.time()
 print("🔧 Verificando entorno...\n")
 
 _PIPS_NEEDED = {
-    "selenium":          "selenium",
-    "openpyxl":          "openpyxl",
-    "webdriver_manager": "webdriver-manager",
-    "IPython":           "ipython",
+    "selenium":            "selenium",
+    "webdriver_manager":   "webdriver-manager",
+    "IPython":             "ipython",
+    "gspread":             "gspread",
+    "google_auth_oauthlib": "google-auth-oauthlib",
 }
 _pips_faltantes = [
     pkg for mod, pkg in _PIPS_NEEDED.items()
@@ -65,6 +66,8 @@ else:
 from common.chrome_bootstrap import find_or_prepare_chrome
 # 0.3 Botón Abortar de la app (ver common/abort.py)
 from common.abort import chequear_abort, AbortadoPorUsuario, ABORT_EXIT_CODE
+# 0.4 Google Sheets como cola de trabajo (ver common/sheets_client.py)
+from common.sheets_client import conectar_sheets, cargar_sheet, actualizar_fila_sheet
 
 CHROMIUM_BIN, ver_chrome = find_or_prepare_chrome()
 
@@ -78,19 +81,24 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.keys import Keys
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment
-from openpyxl.utils import get_column_letter
 
 # ── Config ────────────────────────────────────────────────────
 import getpass
 
-USERNAME   = os.environ.get("TOURPLAN_USERNAME") or input("Usuario Tourplan (minúsculas): ").strip()
-PASSWORD   = os.environ.get("TOURPLAN_PASSWORD") or getpass.getpass("Password Tourplan: ")
-BASE_URL   = os.environ.get("TOURPLAN_BASE_URL", "https://tourplannx.eurotur.com.ar/TourplanNX_Test")
-EXCEL_PATH = os.environ.get("TOURPLAN_EXCEL_PATH", "/content/tourplan_copiar_pcm.xlsx")
-SHEET      = os.environ.get("TOURPLAN_HOJA", "PRODUCTOS")
-SS_DIR     = os.environ.get("TOURPLAN_SS_DIR", "/content/screenshots")
+from common.user_config import (
+    CREDENTIALS_PATH as _CREDENTIALS_PATH_DEFAULT,
+    TOKEN_PATH as _TOKEN_PATH_DEFAULT,
+)
+
+USERNAME         = os.environ.get("TOURPLAN_USERNAME") or input("Usuario Tourplan (minúsculas): ").strip()
+PASSWORD         = os.environ.get("TOURPLAN_PASSWORD") or getpass.getpass("Password Tourplan: ")
+BASE_URL         = os.environ.get("TOURPLAN_BASE_URL", "https://tourplannx.eurotur.com.ar/TourplanNX_Test")
+SHEET_URL        = os.environ.get("TOURPLAN_SHEET_URL", "")
+SHEET            = os.environ.get("TOURPLAN_HOJA", "PRODUCTOS")
+CREDENTIALS_PATH = os.environ.get("TOURPLAN_CREDENTIALS_PATH", _CREDENTIALS_PATH_DEFAULT)
+TOKEN_PATH       = os.environ.get("TOURPLAN_TOKEN_PATH", _TOKEN_PATH_DEFAULT)
+SS_DIR           = os.environ.get("TOURPLAN_SS_DIR", "/content/screenshots")
+HEADLESS         = os.environ.get("TOURPLAN_HEADLESS", "0").strip() in ("1", "true", "True")
 os.makedirs(SS_DIR, exist_ok=True)
 
 # Multiplicador de tiempos de espera. 1.0 = test  |  1.5 = producción
@@ -167,9 +175,11 @@ def crear_driver():
     import tempfile
 
     opts = Options()
-    # Sin --headless: esto corre en la PC de la persona (con pantalla), no en
-    # el contenedor sin pantalla de Colab. Ademas, varias empresas bloquean
-    # el modo headless de Chrome por politica de seguridad.
+    # Sin ventana visible solo si se pide explícitamente (TOURPLAN_HEADLESS,
+    # checkbox en Configuración) — por default corre con ventana real en la
+    # PC de la persona, a diferencia del contenedor sin pantalla de Colab.
+    if HEADLESS:
+        opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1366,911")
@@ -1247,140 +1257,88 @@ def linkear_pcm_a_servicio(driver, location, supplier, codigo_nuevo):
     print(f"    ✅ PCM linkeado a {location or '—'}/{supplier}/{codigo_nuevo}")
 
 # ── Excel ──────────────────────────────────────────────────────
-def crear_excel_si_no_existe():
-    if os.path.exists(EXCEL_PATH):
-        return False
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = SHEET
+HEADER_ALIASES = {
+    "LOCATION":         "location",
+    "SUPPLIER":         "supplier",
+    "SERVICE TYPE":     "service_type",
+    "SERVICE CODE":     "service_code",
+    "CODIGO NUEVO":     "codigo_nuevo",
+    "CÓDIGO NUEVO":     "codigo_nuevo",
+    "MOSTRAR CAPTURAS": "mostrar_capturas",
+    "ESTADO":           "estado",
+    "PCM ORIGINAL":     "pcm_original",
+    "PCM COPIADO":      "pcm_copiado",
+    "ERROR":            "error_msg",
+    "TIMESTAMP":        "timestamp",
+}
 
-    fill_h = PatternFill("solid", start_color="1F4E79", fgColor="1F4E79")
-    font_h = Font(name="Arial", bold=True, color="FFFFFF", size=9)
-    aln_c  = Alignment(horizontal="center", vertical="center", wrap_text=True)
+_ws = None            # worksheet ya conectado (ver conectar_sheet())
+_columnas = None       # encabezados tal cual figuran en el Sheet
+_campo_a_columna = None  # "estado" -> nombre real de columna en el Sheet
 
-    headers = [
-        "LOCATION", "SUPPLIER", "SERVICE TYPE", "SERVICE CODE",
-        "CODIGO NUEVO", "MOSTRAR CAPTURAS",
-        "ESTADO", "PCM ORIGINAL", "PCM COPIADO", "ERROR", "TIMESTAMP"
-    ]
-    for col, h in enumerate(headers, 1):
-        c = ws.cell(row=1, column=col, value=h)
-        c.font = font_h; c.fill = fill_h; c.alignment = aln_c
+def _mapear_columnas(columnas):
+    """Traduce cada campo lógico (location/supplier/.../estado/...) al
+    nombre de columna real que tiene en el Sheet — por alias de
+    encabezado si lo encuentra, o si no por la posición original del
+    Excel (dict C), igual que hacía get_col() con el Excel."""
+    mapa = {}
+    for encabezado in columnas:
+        campo = HEADER_ALIASES.get(str(encabezado).strip().upper())
+        if campo and campo not in mapa:
+            mapa[campo] = encabezado
+    for campo, pos in C.items():
+        if campo not in mapa and 0 <= pos - 1 < len(columnas):
+            mapa[campo] = columnas[pos - 1]
+    return mapa
 
-    ws.cell(row=2, column=C["location"],         value="BUE")
-    ws.cell(row=2, column=C["supplier"],         value="1EURO1")
-    ws.cell(row=2, column=C["service_type"],     value="EX")
-    ws.cell(row=2, column=C["service_code"],     value="6CRIO1")
-    ws.cell(row=2, column=C["codigo_nuevo"],     value="1COCLA")
-    ws.cell(row=2, column=C["mostrar_capturas"], value="NO")
-    ws.cell(row=2, column=C["estado"],           value="EJEMPLO")
-
-    widths = [10,10,13,14,14,16,12,30,30,40,18]
-    for i, w in enumerate(widths, 1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-
-    wb.save(EXCEL_PATH)
-    print(f"✅ Excel creado: {EXCEL_PATH}")
-    return True
+def conectar_sheet():
+    global _ws
+    _ws = conectar_sheets(SHEET_URL, SHEET, CREDENTIALS_PATH, TOKEN_PATH)
+    return _ws
 
 def leer_flag_mostrar_capturas():
     try:
-        wb  = openpyxl.load_workbook(EXCEL_PATH, data_only=True)
-        ws  = wb[SHEET] if SHEET in wb.sheetnames else wb.active
-        header = [str(c.value or "").strip().upper() for c in ws[1]]
-        idx = next((k for k, h in enumerate(header)
-                    if h in ("MOSTRAR CAPTURAS", "CAPTURAS",
-                             "MOSTRAR SCREENSHOTS", "SCREENSHOTS")), None)
-        val = ""
-        if idx is not None:
-            for row in ws.iter_rows(min_row=2):
-                if idx < len(row) and str(row[idx].value or "").strip():
-                    val = str(row[idx].value).strip().upper(); break
-        wb.close()
-        return val in ("SI", "SÍ", "S", "YES", "Y", "TRUE", "1")
+        filas, columnas = cargar_sheet(_ws)
+        col = _mapear_columnas(columnas).get("mostrar_capturas")
+        if not col:
+            return False
+        for fila in filas:
+            val = str(fila.get(col) or "").strip().upper()
+            if val:
+                return val in ("SI", "SÍ", "S", "YES", "Y", "TRUE", "1")
+        return False
     except Exception:
         return False
 
 def leer_pendientes():
+    global _columnas, _campo_a_columna
     ESTADOS_PENDIENTE = {"PENDIENTE", "PENDING", "PEND"}
-    wb = openpyxl.load_workbook(EXCEL_PATH)
-    ws = wb[SHEET] if SHEET in wb.sheetnames else wb.active
+    filas_sheet, _columnas = cargar_sheet(_ws)
+    _campo_a_columna = _mapear_columnas(_columnas)
 
-    header_row = [str(c.value or "").strip().upper() for c in ws[1]]
-    HEADER_ALIASES = {
-        "LOCATION":         "location",
-        "SUPPLIER":         "supplier",
-        "SERVICE TYPE":     "service_type",
-        "SERVICE CODE":     "service_code",
-        "CODIGO NUEVO":     "codigo_nuevo",
-        "CÓDIGO NUEVO":     "codigo_nuevo",
-        "MOSTRAR CAPTURAS": "mostrar_capturas",
-        "ESTADO":           "estado",
-        "PCM ORIGINAL":     "pcm_original",
-        "PCM COPIADO":      "pcm_copiado",
-        "ERROR":            "error_msg",
-        "TIMESTAMP":        "timestamp",
-    }
-    col_map = {}
-    for idx, h in enumerate(header_row):
-        campo = HEADER_ALIASES.get(h)
-        if campo and campo not in col_map:
-            col_map[campo] = idx
-
-    def get_col(campo):
-        return col_map.get(campo, C.get(campo, 1) - 1)
-
-    idx_estado = get_col("estado")
+    col_estado = _campo_a_columna.get("estado")
     filas = []
-    for i, row in enumerate(ws.iter_rows(min_row=2), start=2):
-        if idx_estado >= len(row): continue
-        est = str(row[idx_estado].value or "").strip().upper()
+    for fila in filas_sheet:
+        est = str(fila.get(col_estado) or "").strip().upper()
         if est in ESTADOS_PENDIENTE:
-            d = {}
-            for campo in C:
-                ci = get_col(campo)
-                d[campo] = row[ci].value if ci < len(row) else None
-            d["_row"] = i
+            d = {campo: fila.get(col) for campo, col in _campo_a_columna.items()}
+            d["_row"] = fila["__row_idx__"]
             filas.append(d)
-
-    wb.close()
     return filas
 
-def _estilo_estado(estado):
-    if estado == "OK":
-        return (PatternFill("solid", start_color="E2EFDA", fgColor="E2EFDA"),
-                Font(name="Arial", bold=True, color="375623", size=9))
-    elif "ERROR" in estado.upper():
-        return (PatternFill("solid", start_color="FFE0E0", fgColor="FFE0E0"),
-                Font(name="Arial", bold=True, color="C00000", size=9))
-    return (PatternFill("solid", start_color="FFF2CC", fgColor="FFF2CC"),
-            Font(name="Arial", bold=True, color="7F6000", size=9))
-
 def marcar_procesando(row_num):
-    wb = openpyxl.load_workbook(EXCEL_PATH)
-    ws = wb[SHEET]
-    c  = ws.cell(row=row_num, column=C["estado"])
-    fill, font = _estilo_estado("PROCESANDO")
-    c.value = "PROCESANDO"; c.fill = fill; c.font = font
-    wb.save(EXCEL_PATH); wb.close()
+    col_estado = _campo_a_columna["estado"]
+    actualizar_fila_sheet(_ws, row_num, _columnas, {col_estado: "PROCESANDO"})
 
 def escribir_resultado(row_num, estado, pcm_original="", pcm_copiado="", error=""):
-    wb = openpyxl.load_workbook(EXCEL_PATH)
-    ws = wb[SHEET]
-
-    ws.cell(row=row_num, column=C["pcm_original"]).value = pcm_original
-    ws.cell(row=row_num, column=C["pcm_copiado"]).value  = pcm_copiado
-    ws.cell(row=row_num, column=C["timestamp"]).value = \
-        datetime.now().strftime("%Y-%m-%d %H:%M")
-    ws.cell(row=row_num, column=C["error_msg"]).value = \
-        error[:300] if error else ""
-
-    c_est       = ws.cell(row=row_num, column=C["estado"])
-    fill, font  = _estilo_estado(estado)
-    c_est.value = estado; c_est.fill = fill; c_est.font = font
-    c_est.alignment = Alignment(horizontal="center", vertical="center")
-
-    wb.save(EXCEL_PATH); wb.close()
+    valores = {
+        _campo_a_columna["pcm_original"]: pcm_original,
+        _campo_a_columna["pcm_copiado"]:  pcm_copiado,
+        _campo_a_columna["timestamp"]:    datetime.now().strftime("%Y-%m-%d %H:%M"),
+        _campo_a_columna["error_msg"]:    error[:300] if error else "",
+        _campo_a_columna["estado"]:       estado,
+    }
+    actualizar_fila_sheet(_ws, row_num, _columnas, valores)
 
 # ── Procesar una fila ────────────────────────────────────────
 def procesar_fila(driver, fila):
@@ -1473,17 +1431,11 @@ print(f"  📌 TOURPLAN NX — COPIAR PCM DESDE SERVICIO MADRE  v{VERSION}")
 print(f"  📌 {VERSION_FECHA}")
 print("="*60)
 
-_recien_creado = crear_excel_si_no_existe()
-print(f"📄 Excel: {EXCEL_PATH}  (existía: {'NO, se creó plantilla' if _recien_creado else 'sí'})")
+if not SHEET_URL:
+    raise ValueError("No se indicó la URL del Google Sheet (TOURPLAN_SHEET_URL).")
 
-if _recien_creado:
-    print("\n" + "="*60)
-    print("⛔ NO HABÍA EXCEL — se creó una PLANTILLA vacía.")
-    print(f"   Ruta: {EXCEL_PATH}")
-    print("   1) Completá tus filas con ESTADO=PENDIENTE")
-    print("   2) Volvé a correr la celda.")
-    print("="*60)
-    raise SystemExit("Excel recién creado: cargá tus datos y volvé a correr.")
+conectar_sheet()
+print(f"📄 Sheet: {SHEET_URL}")
 
 MOSTRAR_CAPTURAS = leer_flag_mostrar_capturas()
 print(f"🖼  Mostrar capturas inline: {'SÍ' if MOSTRAR_CAPTURAS else 'NO'}")
@@ -1497,8 +1449,7 @@ for f in pendientes:
 
 if not pendientes:
     print("\n" + "="*60)
-    print("⛔ EL EXCEL NO TIENE FILAS PENDIENTE.")
-    print(f"   Ruta: {EXCEL_PATH}")
+    print("⛔ EL SHEET NO TIENE FILAS PENDIENTE.")
     print("   Poné ESTADO=PENDIENTE en las filas a procesar y volvé a correr.")
     print("="*60)
     raise SystemExit("Sin filas PENDIENTE.")
@@ -1539,10 +1490,3 @@ finally:
 
 if _abortado:
     sys.exit(ABORT_EXIT_CODE)
-
-try:
-    from google.colab import files
-    files.download(EXCEL_PATH)
-    print("📥 Excel descargado.")
-except Exception:
-    pass
