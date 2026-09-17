@@ -9,8 +9,9 @@ Scripts activos, agrupados por categoría:
 - Relevamiento: Vigencias (lista de períodos de RATES sin costos, solo lectura).
 
 Cada script corre como subproceso propio (ver README.md - "Por que
-subprocess"), parametrizado por variables de entorno. Las credenciales
-nunca se escriben a disco: viajan solo en el entorno del subproceso.
+subprocess"), parametrizado por variables de entorno. El usuario/password
+de Tourplan se guardan en ~/.tourplan-nx-app/config.json (ver
+common/user_config.py) para no tener que tipearlos en cada corrida.
 """
 import os
 import subprocess
@@ -24,6 +25,7 @@ import streamlit as st
 
 from common.abort import ABORT_EXIT_CODE
 from common import user_config
+from common.sheets_client import conectar_sheets, cargar_sheet
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -169,6 +171,45 @@ SCRIPTS = {
 }
 
 
+def _clasificar_estado(valor):
+    """Agrupa el valor crudo de la columna ESTADO (que en varios scripts
+    incluye el detalle del error, ej. "ERROR: Faltan campos...") en un
+    puñado de categorías fijas para poder contarlas."""
+    v = (valor or "").strip().upper()
+    if not v or v in ("PENDIENTE", "PENDING", "PEND"):
+        return "Pendiente"
+    if v == "PROCESANDO":
+        return "En proceso"
+    if v.startswith("ERROR"):
+        return "Error"
+    if v == "OK" or v.startswith("OK "):
+        return "OK"
+    return "Otro"
+
+
+def _contar_estados(filas, columna="ESTADO"):
+    conteo = {"Pendiente": 0, "En proceso": 0, "OK": 0, "Error": 0, "Otro": 0}
+    for fila in filas:
+        conteo[_clasificar_estado(fila.get(columna))] += 1
+    return conteo
+
+
+def _refrescar_conteo(state, sheet_url, hoja):
+    """Lee el Sheet ahora mismo y actualiza el conteo guardado en el
+    estado del script. No propaga la excepción — un fallo de refresco no
+    tiene que interrumpir una corrida en curso."""
+    try:
+        ws = conectar_sheets(
+            sheet_url, hoja, user_config.CREDENTIALS_PATH, user_config.TOKEN_PATH)
+        filas, _ = cargar_sheet(ws)
+        state["conteo"] = _contar_estados(filas)
+        state["conteo_ts"] = time.time()
+        return True
+    except Exception as e:
+        state["conteo_error"] = str(e)
+        return False
+
+
 def _leer_proceso(proc, state):
     """Corre en un hilo aparte: lee el stdout del subproceso sin bloquear el
     script de Streamlit, para que el botón Abortar pueda reaccionar mientras
@@ -203,20 +244,41 @@ def render_script_tab(key, cfg):
         }
     state = st.session_state[state_key]
 
-    sheet_url = st.text_input(
-        "URL del Google Sheet",
-        value=user_config.sheet_url_default(key),
-        key=f"sheet_url_{key}",
-        disabled=state["running"],
-        help="Se precarga con la URL guardada en Configuración para este script, si hay una. Siempre editable.",
-    )
+    col_sheet, col_refresh = st.columns([4, 1])
+    with col_sheet:
+        sheet_url = st.text_input(
+            "URL del Google Sheet",
+            value=user_config.sheet_url_default(key),
+            key=f"sheet_url_{key}",
+            disabled=state["running"],
+            help="Se precarga con la URL guardada en Configuración para este script, si hay una. Siempre editable.",
+        )
+    with col_refresh:
+        st.markdown("<div style='height: 1.9em'></div>", unsafe_allow_html=True)
+        refrescar_clicked = st.button(
+            "🔄 Refrescar",
+            key=f"refrescar_{key}",
+            disabled=state["running"] or not sheet_url,
+            use_container_width=True,
+            help="Lee el Sheet ahora y cuenta cuántas filas están Pendiente/OK/Error.",
+        )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        username = st.text_input("Usuario Tourplan", key=f"user_{key}", disabled=state["running"])
-    with col2:
-        password = st.text_input(
-            "Password Tourplan", type="password", key=f"pass_{key}", disabled=state["running"])
+    if refrescar_clicked:
+        _refrescar_conteo(state, sheet_url, cfg["sheet"])
+
+    if state.get("conteo"):
+        cols = st.columns(5)
+        for col, (etiqueta, n) in zip(cols, state["conteo"].items()):
+            col.metric(etiqueta, n)
+    elif state.get("conteo_error"):
+        st.error(f"No pude leer el Sheet: {state['conteo_error']}")
+
+    username, password = user_config.tp_credenciales_default()
+    if not (username and password):
+        st.warning(
+            "Falta cargar tu usuario/contraseña de Tourplan en ⚙️ Configuración "
+            "(se completan solos acá una vez guardados)."
+        )
 
     base_url = st.text_input(
         "URL de Tourplan",
@@ -276,7 +338,10 @@ def render_script_tab(key, cfg):
                  "las filas restantes en PENDIENTE para retomar en otra corrida.",
         )
     if not campos_completos and not state["running"]:
-        st.caption("Completá la URL del Sheet, usuario, password y URL de Tourplan para poder ejecutar.")
+        st.caption(
+            "Completá la URL del Sheet y la URL de Tourplan (y tu usuario/password "
+            "en ⚙️ Configuración) para poder ejecutar."
+        )
 
     if run_clicked:
         run_dir = Path(tempfile.mkdtemp(prefix=f"tourplan_{key}_"))
@@ -347,6 +412,7 @@ def render_script_tab(key, cfg):
     if state["running"] and state["finished"]:
         state["running"] = False
         rc = state["returncode"]
+        _refrescar_conteo(state, sheet_url, cfg["sheet"])
 
         if rc == 0:
             st.success(f"Terminó OK (código de salida {rc}). Revisá el resultado en el Sheet.")
@@ -362,6 +428,8 @@ def render_script_tab(key, cfg):
             )
 
     if state["running"]:
+        if time.time() - state.get("conteo_ts", 0) > 5:
+            _refrescar_conteo(state, sheet_url, cfg["sheet"])
         time.sleep(1)
         st.rerun()
 
@@ -379,6 +447,18 @@ def render_configuracion():
     cfg = user_config.cargar()
 
     with st.form("form_configuracion"):
+        st.subheader("Credenciales de Tourplan")
+        st.caption(
+            "Se completan automáticamente en cada script — ya no hace falta "
+            "tipearlas antes de ejecutar."
+        )
+        col_user, col_pass = st.columns(2)
+        with col_user:
+            tp_usuario = st.text_input("Usuario Tourplan", value=cfg.get("tp_usuario", ""))
+        with col_pass:
+            tp_password = st.text_input(
+                "Password Tourplan", value=cfg.get("tp_password", ""), type="password")
+
         headless = st.checkbox(
             "Correr sin ventana de Chrome visible (headless)",
             value=bool(cfg.get("headless", False)),
@@ -408,7 +488,12 @@ def render_configuracion():
         guardado = st.form_submit_button("Guardar", type="primary", use_container_width=True)
 
     if guardado:
-        user_config.guardar({"headless": headless, "sheet_urls": nuevas_urls})
+        user_config.guardar({
+            "tp_usuario": tp_usuario,
+            "tp_password": tp_password,
+            "headless": headless,
+            "sheet_urls": nuevas_urls,
+        })
         st.success("Configuración guardada.")
 
 
@@ -454,7 +539,8 @@ def main():
     st.title("Tourplan NX - Herramientas")
     st.caption(
         "Corre siempre contra producción. "
-        "Las credenciales no se guardan en disco ni se comparten entre corridas."
+        "Usuario/password de Tourplan se guardan localmente en esta PC (⚙️ Configuración) — "
+        "nunca se suben al repositorio ni se comparten con el resto del equipo."
     )
 
     render_sidebar_nav()
