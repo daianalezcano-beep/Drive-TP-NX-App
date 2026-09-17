@@ -31,8 +31,8 @@
 #   OBSERVACIONES     — (opcional) contexto adicional del resultado
 # ============================================================
 
-VERSION       = "1.2"
-VERSION_FECHA = "2026-09-01"
+VERSION       = "1.3"
+VERSION_FECHA = "2026-09-17"
 
 # ── CAMBIOS ──
 # v1.0: primera versión (solo Option Description).
@@ -47,6 +47,9 @@ VERSION_FECHA = "2026-09-01"
 #       Location en buscar_producto(), ver notas_srv.py v1.13/v1.14).
 #       Ahora busca el ítem que contiene el valor como PALABRA COMPLETA;
 #       si ninguno coincide, no clickea nada a ciegas.
+# v1.3: agregado ensure_class_field() — el campo CLASS bloquea el Save
+#       si queda vacío (mismo caso confirmado en
+#       flag_products_as_deleted.py).
 
 # ── CONFIGURACIÓN — via variables de entorno (con default = valor original) ──
 import os
@@ -147,6 +150,10 @@ SEL = {
     "COMMENT_INPUT"              : "#optionComment input",
     "COMMENT_INPUT_FALLBACK"     : "#tabs-product ul:nth-of-type(1) > li:nth-of-type(3) input",
     "SAVE_BTN"         : "tp-button.save > button",
+    # Campo CLASS — bloquea el Save si queda vacío (mismo caso que
+    # flag_products_as_deleted.py).
+    "FIELD_CLASS"          : "#tabs-product ul:nth-of-type(2) > li:nth-of-type(2) input",
+    "SUGGEST_OPTION_CELL"  : "td.description",
 }
 
 COL_LOCATION        = "LOCATION"
@@ -811,6 +818,47 @@ def actualizar_option_comment(driver, nuevo_comentario):
     _escribir_campo(driver, SEL["COMMENT_INPUT"], SEL["COMMENT_INPUT_FALLBACK"],
                      nuevo_comentario, "Option Comment")
 
+# ── Campo CLASS (bloquea el Save si queda vacío) ────────────────
+# Mismo caso confirmado en flag_products_as_deleted.py: el option puede
+# llegar con CLASS sin cargar, y eso impide que el Save se habilite —
+# acá también hace falta revisarlo antes de esperar el SAVE.
+
+def _click_first_suggestion(driver, timeout=WAIT_SHORT):
+    """Clickea la primera fila visible de una tabla de sugerencias/opciones (mismo
+    componente que usan los autocomplete de Location/Supplier), sin asumir un texto
+    fijo — no hardcodear 'Unassigned' como primera opción de CLASS, por si en otros
+    casos el orden difiere (ver flag_products_as_deleted.py)."""
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, SEL["SUGGEST_OPTION_CELL"])))
+    except TimeoutException:
+        return False
+    opciones = [c for c in driver.find_elements(By.CSS_SELECTOR, SEL["SUGGEST_OPTION_CELL"])
+                if c.is_displayed()]
+    if not opciones:
+        return False
+    jc(driver, opciones[0])
+    return True
+
+def ensure_class_field(driver):
+    """El campo CLASS bloquea el Save si queda vacío. Si está vacío se abre su
+    dropdown y se clickea la primera opción (sin asumir 'Unassigned'); si ya
+    tiene un valor cargado, no se toca (es un dato de negocio existente). Si
+    el campo no existe en este producto/tab, no bloquea."""
+    try:
+        class_input = wait(driver, SEL["FIELD_CLASS"], t=WAIT_SHORT)
+    except TimeoutException:
+        return None
+    valor_actual = (class_input.get_attribute("value") or "").strip()
+    if valor_actual:
+        return None
+    class_input.click()
+    time.sleep(0.3)
+    if not _click_first_suggestion(driver):
+        return "CLASS estaba vacío y no aparecieron opciones para completarlo"
+    time.sleep(0.8)
+    return None
+
 def wait_save_habilitado(driver, save_selector, timeout=SAVE_POLL_TIMEOUT, interval=SAVE_POLL_INTERVAL):
     """Polling activo del botón SAVE — no un sleep fijo. Puede haber más
     de un tp-button.save en la vista; se toma el primero visible+enabled
@@ -966,6 +1014,12 @@ def process_row(driver, row):
         return todo_ok, "; ".join(resultados)
 
     lectores_por_nombre = {nombre: lector for nombre, _col, lector, _editor in CAMPOS_EDITABLES}
+
+    class_err = ensure_class_field(driver)
+    if class_err:
+        ss(driver, f"class_vacio_{codigo}")
+        exit_to_results(driver)
+        return "ERROR", class_err
 
     ss(driver, f"pre_save_{codigo}")
     btn, err = wait_save_habilitado(driver, SEL["SAVE_BTN"])
