@@ -115,10 +115,11 @@ print("🔧 Verificando entorno...\n")
 
 # ── 0.1  Paquetes Python ─────────────────────────────────────
 _PIPS_NEEDED = {
-    "selenium":         "selenium",
-    "openpyxl":         "openpyxl",
-    "webdriver_manager":"webdriver-manager",
-    "IPython":          "ipython",
+    "selenium":            "selenium",
+    "webdriver_manager":   "webdriver-manager",
+    "IPython":             "ipython",
+    "gspread":             "gspread",
+    "google_auth_oauthlib": "google-auth-oauthlib",
 }
 _pips_faltantes = [
     pkg for mod, pkg in _PIPS_NEEDED.items()
@@ -138,6 +139,12 @@ else:
 from common.chrome_bootstrap import find_or_prepare_chrome
 # ── 0.2b  Botón Abortar de la app (ver common/abort.py) ──────
 from common.abort import chequear_abort, AbortadoPorUsuario, ABORT_EXIT_CODE
+# ── 0.2c  Google Sheets como cola de trabajo (ver common/sheets_client.py) ──
+from common.sheets_client import conectar_sheets, cargar_sheet, actualizar_fila_sheet, asegurar_columnas
+from common.user_config import (
+    CREDENTIALS_PATH as _CREDENTIALS_PATH_DEFAULT,
+    TOKEN_PATH as _TOKEN_PATH_DEFAULT,
+)
 
 CHROMIUM_BIN, ver_chrome = find_or_prepare_chrome()
 
@@ -154,18 +161,17 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.keys import Keys
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-from openpyxl.comments import Comment
 
 # ── Config — via variables de entorno (con default = valor original) ──
-USERNAME   = os.environ.get("TOURPLAN_USERNAME", "poner minusculas")
-PASSWORD   = os.environ.get("TOURPLAN_PASSWORD", "password")
-BASE_URL   = os.environ.get("TOURPLAN_BASE_URL", "https://tourplannx.eurotur.com.ar/TourplanNX_Test")
-EXCEL_PATH = os.environ.get("TOURPLAN_EXCEL_PATH", "/content/tourplan_valorizacion_pkg.xlsx")
-SHEET      = os.environ.get("TOURPLAN_HOJA", "PRODUCTOS")
-SS_DIR     = os.environ.get("TOURPLAN_SS_DIR", "/content/screenshots")
+USERNAME         = os.environ.get("TOURPLAN_USERNAME", "poner minusculas")
+PASSWORD         = os.environ.get("TOURPLAN_PASSWORD", "password")
+BASE_URL         = os.environ.get("TOURPLAN_BASE_URL", "https://tourplannx.eurotur.com.ar/TourplanNX_Test")
+SHEET_URL        = os.environ.get("TOURPLAN_SHEET_URL", "")
+SHEET            = os.environ.get("TOURPLAN_HOJA", "PRODUCTOS")
+CREDENTIALS_PATH = os.environ.get("TOURPLAN_CREDENTIALS_PATH", _CREDENTIALS_PATH_DEFAULT)
+TOKEN_PATH       = os.environ.get("TOURPLAN_TOKEN_PATH", _TOKEN_PATH_DEFAULT)
+SS_DIR           = os.environ.get("TOURPLAN_SS_DIR", "/content/screenshots")
+HEADLESS         = os.environ.get("TOURPLAN_HEADLESS", "0").strip() in ("1", "true", "True")
 os.makedirs(SS_DIR, exist_ok=True)
 
 # ── Modo de ejecución ─────────────────────────────────────────
@@ -181,7 +187,7 @@ VELOCIDAD = float(os.environ.get("TOURPLAN_VELOCIDAD", "1.5"))
 # Límite de PCMs a procesar en Fase 2 (0 = sin límite). Para iterar rápido
 # sobre el problema de escritura: poné MODO="APLICAR" y FASE2_LIMIT=1 y corre
 # SOLO la Fase 2 del primer servicio madre (≈2-3 min en vez de ~38 min).
-# Requiere que el Excel (EXCEL_PATH) ya tenga la Fase 1 cargada (subilo a Colab).
+# Requiere que el Sheet (SHEET_URL) ya tenga la Fase 1 cargada.
 FASE2_LIMIT = 0
 # Si True, la Fase 2 reprocesa TODAS las filas con COD DESTINO sin importar el
 # ESTADO F2 (sirve para re-testear con un Excel cuya Fase 2 ya falló/corrió, sin
@@ -267,9 +273,11 @@ def crear_driver():
     import tempfile
 
     opts = Options()
-    # Sin --headless: esto corre en la PC de la persona (con pantalla), no en
-    # el contenedor sin pantalla de Colab. Ademas, varias empresas bloquean
-    # el modo headless de Chrome por politica de seguridad.
+    # Sin ventana visible solo si se pide explícitamente (TOURPLAN_HEADLESS,
+    # checkbox en Configuración) — por default corre con ventana real en la
+    # PC de la persona, a diferencia del contenedor sin pantalla de Colab.
+    if HEADLESS:
+        opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1366,911")
@@ -3172,58 +3180,7 @@ def _escribir_rates(driver, valores_pcm, cod):
           + (f"  (🚩 {len(pendientes)} pendientes de revisión)" if pendientes else ""))
     return v_viejos, v_nuevos, rangos_madre, pendientes
 
-# ── Excel ──────────────────────────────────────────────────────
-def crear_excel_si_no_existe():
-    """Crea el Excel de trabajo con estructura base si no existe.
-    Devuelve True si lo acaba de crear, False si ya existía."""
-    if os.path.exists(EXCEL_PATH):
-        return False
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = SHEET
-
-    fill_h = PatternFill("solid", start_color="1F4E79", fgColor="1F4E79")
-    font_h = Font(name="Arial", bold=True, color="FFFFFF", size=9)
-    aln_c  = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    headers_base = [
-        "LOCATION","SUPPLIER","COD ORIGEN","SERVICE TYPE",
-        "RATE FROM","RATE TO","PRICE CODE","MOSTRAR CAPTURAS",
-        "COD DESTINO","RATE FROM D","RATE TO D",
-        "PCM REF","DÍAS OP","ESTADO","ERROR","TIMESTAMP"
-    ]
-    for col, h in enumerate(headers_base, 1):
-        c = ws.cell(row=1, column=col, value=h)
-        c.font = font_h; c.fill = fill_h; c.alignment = aln_c
-
-    # Fila de ejemplo (TKCEM pertenece al supplier 6CEMRE; usar el supplier real
-    # del producto, NO el del servicio madre). Es solo un ejemplo: reemplazá la
-    # fila por tus datos y dejá ESTADO=PENDIENTE.
-    ws.cell(row=2, column=C["location"],     value="BUE")
-    ws.cell(row=2, column=C["supplier"],     value="6CEMRE")
-    ws.cell(row=2, column=C["cod_origen"],   value="TKCEM")
-    ws.cell(row=2, column=C["service_type"], value="TK")
-    ws.cell(row=2, column=C["rate_from"],    value="01/Sep/2026")
-    ws.cell(row=2, column=C["rate_to"],      value="31/Dec/2026")
-    ws.cell(row=2, column=C["price_code"],   value="TR")    # TR, 34, ... o ALL
-    ws.cell(row=2, column=C["mostrar_capturas"], value="NO")
-    # OJO: el ejemplo NO queda en PENDIENTE a propósito, para que la plantilla
-    # recién creada no se autoejecute. Completá tus datos y poné ESTADO=PENDIENTE.
-    ws.cell(row=2, column=C["estado"],       value="EJEMPLO")
-
-    for col_letter, w in (("A",10),("B",10),("C",12),("D",13),("E",13),
-                          ("F",13),("G",11),("H",16),("I",12),
-                          ("N",12),("O",40)):
-        ws.column_dimensions[col_letter].width = w
-
-    _init_pcm_detail_sheet(wb)
-    _aplicar_comentarios_excel(wb)
-
-    wb.save(EXCEL_PATH)
-    print(f"✅ Excel creado: {EXCEL_PATH}")
-    print("   Completá las filas con estado=PENDIENTE y volvé a correr el script.")
-    return True
-
+# ── Sheets ─────────────────────────────────────────────────────
 SHEET_DETAIL = "PCM_Detail"
 
 # Columnas fijas de PCM_Detail (en orden):
@@ -3247,143 +3204,24 @@ _MARKUP_PAX = [f"{n}+0" for n in range(1, 42)]
 _DETAIL_MARKUP_START = len(_DETAIL_HEADERS) + 1            # col 19
 _DETAIL_RATES_START  = _DETAIL_MARKUP_START + len(_MARKUP_PAX)  # tras el markup
 
-def _init_pcm_detail_sheet(wb):
-    """Crea o reinicia encabezados fijos de PCM_Detail (no toca filas de datos)."""
-    if SHEET_DETAIL not in wb.sheetnames:
-        ws = wb.create_sheet(SHEET_DETAIL)
-    else:
-        ws = wb[SHEET_DETAIL]
-    fill_h = PatternFill("solid", start_color="1F4E79", fgColor="1F4E79")
-    font_h = Font(name="Arial", bold=True, color="FFFFFF", size=9)
-    aln_c  = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    for col, h in enumerate(_DETAIL_HEADERS, 1):
-        c = ws.cell(row=1, column=col, value=h)
-        c.font = font_h; c.fill = fill_h; c.alignment = aln_c
-    widths = [16,12,10,10,13,13, 28,12,12,14, 12,12,40,11, 12,35,14,35]
-    for i, w in enumerate(widths, 1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-    # Headers del bloque markup abierto (un rango pax por columna)
-    fill_m = PatternFill("solid", start_color="2E75B6", fgColor="2E75B6")
-    font_m = Font(name="Arial", bold=True, color="FFFFFF", size=8)
-    for i, rango in enumerate(_MARKUP_PAX):
-        col = _DETAIL_MARKUP_START + i
-        c = ws.cell(row=1, column=col, value=rango)
-        c.font = font_m; c.fill = fill_m; c.alignment = aln_c
-        ws.column_dimensions[get_column_letter(col)].width = 8
-    return ws
+# Comentarios de ayuda en los headers del Excel original — decisión
+# explícita: no se portan a Sheets por ahora (la ayuda de cada columna
+# sigue en el README/skills del repo).
 
+# Worksheets conectados (ver conectar_sheets_pkg()) y sus encabezados —
+# se leen una vez y se reusan entre llamadas, para no re-autenticar
+# contra Google en cada fila.
+_ws = None
+_ws_detail = None
+_columnas = None
+_campo_a_columna = None
+_columnas_detail = None
 
-# Comentarios de ayuda en los headers del Excel: qué se completa a mano
-# (ENTRADA), qué escribe el script (SALIDA) y cómo leer cada estado.
-_COMENTARIOS_PRODUCTOS = {
-    "LOCATION":     "ENTRADA\nCiudad Tourplan del producto origen.\nEj: BUE",
-    "SUPPLIER":     "ENTRADA\nCódigo de supplier del producto origen "
-                    "(solo el código, sin nombre).\nEj: 6CEMRE",
-    "COD ORIGEN":   "ENTRADA\nCódigo del producto origen. De su lista USED IN "
-                    "salen los PCMs 'Package Service' (PKG-...).\nEj: TKCEM",
-    "SERVICE TYPE": "ENTRADA\nTipo de servicio del producto origen (ej: TK). "
-                    "Si el tipo no existe en el buscador, se busca sin filtro "
-                    "(warning inofensivo en el log).",
-    "RATE FROM":    "ENTRADA\nInicio del período a valorizar en los servicios "
-                    "madre. Formato dd/Mon/yyyy.\nEj: 01/Sep/2026",
-    "RATE TO":      "ENTRADA\nFin del período a valorizar.\nEj: 31/Dec/2026",
-    "COD DESTINO":  "ENTRADA OPCIONAL\nFuerza el código del servicio madre. "
-                    "Si queda vacío se usa el último segmento del nombre del "
-                    "PCM (PKG-BUE-EX-1EURO1-XXXX → XXXX).",
-    "RATE FROM D":  "ENTRADA OPCIONAL\nFecha base para el recalculate/Change "
-                    "Base Date del PCM (con la regla de siguiente día hábil "
-                    "si no opera esa fecha exacta). Vacía → usa RATE FROM, "
-                    "igual que antes. RATE FROM sigue siendo la base para "
-                    "crear/buscar el período de rates a valorizar.\n"
-                    "Formato dd/Mon/yyyy.\nEj: 01/Sep/2026",
-    "RATE TO D":    "Reservada (hoy no se usa).",
-    "PCM REF":      "SALIDA\nPCMs procesados en Fase 1, uno por línea.",
-    "DÍAS OP":      "SALIDA\nDías de operación leídos del producto. Si no se "
-                    "pudieron leer, se asumen todos.",
-    "ESTADO":       "ENTRADA/SALIDA\nPoner PENDIENTE para que el script "
-                    "procese la fila.\nEl script escribe: PROCESANDO → "
-                    "FASE1_OK (verde) o ERROR (rojo).\nPara reprocesar, "
-                    "volver a escribir PENDIENTE.",
-    "ERROR":        "SALIDA\nDetalle del error de Fase 1 (si lo hubo).",
-    "TIMESTAMP":    "SALIDA\nFecha/hora de la última actualización de la fila.",
-}
-
-_COMENTARIOS_DETAIL = {
-    "TIMESTAMP":    "SALIDA\nCuándo se leyó este PCM en Fase 1.",
-    "COD ORIGEN":   "SALIDA\nProducto origen del que salió este PCM "
-                    "(copiado de PRODUCTOS).",
-    "LOCATION":     "SALIDA\nCopiado de PRODUCTOS.",
-    "SUPPLIER":     "SALIDA\nSupplier del producto origen (PRODUCTOS).",
-    "RATE FROM":    "SALIDA\nInicio del período a aplicar (PRODUCTOS).",
-    "RATE TO":      "SALIDA\nFin del período a aplicar (PRODUCTOS).",
-    "PCM":          "SALIDA\nNombre del Package Service procesado:\n"
-                    "PKG-{ciudad}-{tipo}-{supplier}-{cod_madre}",
-    "SUPPLIER PCM": "SALIDA\nSupplier leído dentro del PCM. Fase 2 valida que "
-                    "coincida con el supplier del servicio madre.",
-    "COD DESTINO":  "SALIDA\nCódigo del servicio madre que Fase 2 actualiza "
-                    "(último segmento del nombre del PCM u override).",
-    "DIAS OP":      "SALIDA\nDías de operación usados para el Change Base Date.",
-    "FECHA ANT":    "SALIDA\nFecha base del PCM antes del cambio.",
-    "FECHA NUEVA":  "SALIDA\nFecha base aplicada para forzar el recálculo.",
-    "MARKUP JSON":  "SALIDA\nValores leídos por rango pax (JSON). Es el insumo "
-                    "que Fase 2 escribe en el servicio madre. A la derecha se "
-                    "abre el mismo dato en una columna por rango (1+0…41+0) "
-                    "para comparar rápido en Excel.",
-    "PRICE CODE":   "SALIDA\nPrice Code leído del PCM (ej: TR). Fase 2 lo "
-                    "asigna al crear el período de rates del servicio madre. "
-                    "Si queda vacío, Fase 2 usa el Price Code por defecto "
-                    "(PRICE_CODE_DEFAULT, hoy 'TR') para que el período no "
-                    "quede Unassigned.",
-    "ESTADO F1":    "SALIDA\nLEIDO = lectura OK · ERROR = falló la lectura "
-                    "(ver ERROR F1).",
-    "ERROR F1":     "SALIDA\nDetalle del error de Fase 1.",
-    "ESTADO F2":    "SALIDA (editable para reintentar)\n"
-                    "PENDIENTE_APLICAR: Fase 2 lo va a procesar.\n"
-                    "OK: período creado/abierto y rangos AD guardados.\n"
-                    "OK_REVISAR: aplicado, pero una fila que no se toca "
-                    "(CH/IN, HALF TWIN, supplements) tenía valor → revisar "
-                    "manualmente (detalle en ERROR F2).\n"
-                    "SVS_MADRE_NO_ENCONTRADO: el servicio madre no existe "
-                    "en Tourplan.\n"
-                    "ERROR: falla técnica (ver ERROR F2 y screenshots).\n"
-                    "SKIP: sin markup leído.\n"
-                    "Para reintentar una fila, volver a escribir "
-                    "PENDIENTE_APLICAR.",
-    "ERROR F2":     "SALIDA\nDetalle del error de Fase 2, o el listado de "
-                    "filas con valor inesperado cuando el estado es "
-                    "OK_REVISAR.",
-}
-
-def _aplicar_comentarios_excel(wb):
-    """Agrega/actualiza los comentarios de ayuda en los headers de ambas hojas."""
-    def _set(ws, comentarios):
-        for cell in ws[1]:
-            texto = comentarios.get(str(cell.value or "").strip())
-            if texto:
-                c = Comment(texto, "Valorización PKG", height=190, width=320)
-                cell.comment = c
-    if SHEET in wb.sheetnames:
-        _set(wb[SHEET], _COMENTARIOS_PRODUCTOS)
-    if SHEET_DETAIL in wb.sheetnames:
-        _set(wb[SHEET_DETAIL], _COMENTARIOS_DETAIL)
-
-
-def _detail_fill(estado):
-    """Retorna (fill, font) según estado."""
-    if estado in ("LEIDO", "OK"):
-        return (PatternFill("solid", start_color="E2EFDA", fgColor="E2EFDA"),
-                Font(name="Arial", size=9, bold=True, color="375623"))
-    if estado in ("ERROR", "ERROR_FASE1", "ERROR_FASE2"):
-        return (PatternFill("solid", start_color="FFE0E0", fgColor="FFE0E0"),
-                Font(name="Arial", size=9, bold=True, color="C00000"))
-    if estado == "PENDIENTE_APLICAR":
-        return (PatternFill("solid", start_color="FFF2CC", fgColor="FFF2CC"),
-                Font(name="Arial", size=9, bold=True, color="7F6000"))
-    if estado == "OK_REVISAR":
-        return (PatternFill("solid", start_color="FCE4D6", fgColor="FCE4D6"),
-                Font(name="Arial", size=9, bold=True, color="C55A11"))
-    return (PatternFill("solid", start_color="D9D9D9", fgColor="D9D9D9"),
-            Font(name="Arial", size=9, bold=True, color="000000"))
+def conectar_sheets_pkg():
+    global _ws, _ws_detail
+    _ws = conectar_sheets(SHEET_URL, SHEET, CREDENTIALS_PATH, TOKEN_PATH)
+    _ws_detail = conectar_sheets(SHEET_URL, SHEET_DETAIL, CREDENTIALS_PATH, TOKEN_PATH)
+    return _ws, _ws_detail
 
 
 def escribir_pcm_detail_fase1(cod_origen, location, supplier, rate_from, rate_to,
@@ -3394,17 +3232,10 @@ def escribir_pcm_detail_fase1(cod_origen, location, supplier, rate_from, rate_to
     """
     Fase 1: agrega una fila en PCM_Detail con los datos leídos del PCM.
     ESTADO_FASE2 = PENDIENTE_APLICAR (si lectura OK) o SKIP (si error).
+    Usa append_row directo sobre el worksheet (_ws_detail) — Angular/Sheets
+    ya deja la fila siguiente libre, sin necesitar calcular next_row.
     """
-    wb = openpyxl.load_workbook(EXCEL_PATH)
-    if SHEET_DETAIL not in wb.sheetnames:
-        _init_pcm_detail_sheet(wb)
-    ws = wb[SHEET_DETAIL]
-    if ws.cell(row=1, column=1).value != "TIMESTAMP":
-        _init_pcm_detail_sheet(wb)
-
-    next_row = ws.max_row + 1 if ws.max_row > 1 else 2
     estado_f2 = "PENDIENTE_APLICAR" if estado_fase1 == "LEIDO" else "SKIP"
-
     markup_str = json.dumps(markup_dict, ensure_ascii=False) if markup_dict else ""
 
     vals = [
@@ -3415,146 +3246,135 @@ def escribir_pcm_detail_fase1(cod_origen, location, supplier, rate_from, rate_to
         estado_fase1, error_fase1[:300] if error_fase1 else "",
         estado_f2, "",
     ]
-    for col, v in enumerate(vals, 1):
-        c = ws.cell(row=next_row, column=col, value=v)
-        c.font = Font(name="Arial", size=9)
-        c.alignment = Alignment(vertical="center",
-                                wrap_text=(col in (_DETAIL_COL["MARKUP JSON"],
-                                                   _DETAIL_COL["ERROR F1"],
-                                                   _DETAIL_COL["ERROR F2"])))
-        if col == _DETAIL_COL["ESTADO F1"]:
-            fill, font = _detail_fill(estado_fase1)
-            c.fill = fill; c.font = font
-        if col == _DETAIL_COL["ESTADO F2"]:
-            fill, font = _detail_fill(estado_f2)
-            c.fill = fill; c.font = font
+    # Markup abierto: un valor por columna de rango pax (1+0 … 41+0), en el
+    # mismo orden de columnas que ya trae la plantilla.
+    vals += [markup_dict.get(rango, "") if markup_dict else "" for rango in _MARKUP_PAX]
 
-    # Markup abierto: un valor por columna de rango pax (1+0 … 41+0)
-    if markup_dict:
-        for i, rango in enumerate(_MARKUP_PAX):
-            if rango in markup_dict:
-                mc = ws.cell(row=next_row, column=_DETAIL_MARKUP_START + i,
-                             value=markup_dict[rango])
-                mc.font = Font(name="Arial", size=8)
-                mc.alignment = Alignment(horizontal="center")
-
-    wb.save(EXCEL_PATH); wb.close()
+    _ws_detail.append_row(vals, value_input_option="USER_ENTERED")
     print(f"    📝 PCM_Detail F1: {nombre_pcm} → {estado_fase1}/{estado_f2}")
+
+
+def _col_detail(nombre):
+    """Nombre de columna real en PCM_Detail para un campo de _DETAIL_HEADERS
+    — por texto exacto, o si no por la posición fija de _DETAIL_COL (mismo
+    fallback que usaba el Excel original)."""
+    if nombre in _columnas_detail:
+        return nombre
+    pos = _DETAIL_COL.get(nombre)
+    if pos and 0 <= pos - 1 < len(_columnas_detail):
+        return _columnas_detail[pos - 1]
+    return nombre
 
 
 def leer_pcm_detail_pendientes_fase2():
     """Lee filas de PCM_Detail donde ESTADO_FASE2 = PENDIENTE_APLICAR."""
-    wb = openpyxl.load_workbook(EXCEL_PATH)
-    if SHEET_DETAIL not in wb.sheetnames:
-        wb.close(); return []
-    ws = wb[SHEET_DETAIL]
+    global _columnas_detail
+    try:
+        filas_sheet, _columnas_detail = cargar_sheet(_ws_detail)
+    except Exception:
+        return []
 
-    # Detectar columnas por header
-    header_row = [str(c.value or "").strip() for c in ws[1]]
-    col_idx = {h: i for i, h in enumerate(header_row)}
-
-    def gc(name):
-        return col_idx.get(name, _DETAIL_COL.get(name, 0) - 1)
+    def val(fila, nombre):
+        return str(fila.get(_col_detail(nombre)) or "").strip()
 
     filas = []
-    for i, row in enumerate(ws.iter_rows(min_row=2), start=2):
-        def val(name):
-            idx = gc(name)
-            return str(row[idx].value or "").strip() if idx < len(row) else ""
-
+    for fila in filas_sheet:
         if FASE2_REAPLICAR_TODO:
             # Modo re-test: tomar cualquier fila que tenga COD DESTINO,
             # sin importar el ESTADO F2 (que pudo quedar en error/done).
-            if not val("COD DESTINO"):
+            if not val(fila, "COD DESTINO"):
                 continue
-        elif val("ESTADO F2").upper() != "PENDIENTE_APLICAR":
+        elif val(fila, "ESTADO F2").upper() != "PENDIENTE_APLICAR":
             continue
         try:
-            markup_dict = json.loads(val("MARKUP JSON")) if val("MARKUP JSON") else {}
+            markup_dict = json.loads(val(fila, "MARKUP JSON")) if val(fila, "MARKUP JSON") else {}
         except Exception:
             markup_dict = {}
 
         filas.append({
-            "_row":        i,
-            "cod_origen":  val("COD ORIGEN"),
-            "location":    val("LOCATION"),
-            "supplier":    val("SUPPLIER"),
-            "rate_from":   val("RATE FROM"),
-            "rate_to":     val("RATE TO"),
-            "pcm":         val("PCM"),
-            "supplier_pcm":val("SUPPLIER PCM"),
-            "cod_destino": val("COD DESTINO"),
-            "dias_op":     val("DIAS OP"),
-            "fecha_nueva": val("FECHA NUEVA"),
+            "_row":        fila["__row_idx__"],
+            "cod_origen":  val(fila, "COD ORIGEN"),
+            "location":    val(fila, "LOCATION"),
+            "supplier":    val(fila, "SUPPLIER"),
+            "rate_from":   val(fila, "RATE FROM"),
+            "rate_to":     val(fila, "RATE TO"),
+            "pcm":         val(fila, "PCM"),
+            "supplier_pcm":val(fila, "SUPPLIER PCM"),
+            "cod_destino": val(fila, "COD DESTINO"),
+            "dias_op":     val(fila, "DIAS OP"),
+            "fecha_nueva": val(fila, "FECHA NUEVA"),
             "markup_dict": markup_dict,
-            "price_code":  val("PRICE CODE"),
+            "price_code":  val(fila, "PRICE CODE"),
         })
-    wb.close()
     return filas
 
 
 def marcar_pcm_detail_row(row_num, estado_fase2, error="",
                            rangos=None, v_viejos=None, v_nuevos=None):
     """Actualiza ESTADO_FASE2, ERROR_FASE2 y columnas de rates en PCM_Detail."""
-    wb = openpyxl.load_workbook(EXCEL_PATH)
-    ws = wb[SHEET_DETAIL]
-
-    # Headers de rangos dinámicos
-    if rangos:
-        fill_h = PatternFill("solid", start_color="1F4E79", fgColor="1F4E79")
-        font_h = Font(name="Arial", bold=True, color="FFFFFF", size=8)
-        aln_c  = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        for i, rango in enumerate(rangos):
-            col_v = _DETAIL_RATES_START + i * 2
-            col_n = _DETAIL_RATES_START + i * 2 + 1
-            for col, lbl in ((col_v, f"VIEJO {rango}"), (col_n, f"NUEVO {rango}")):
-                c = ws.cell(row=1, column=col, value=lbl)
-                c.font = font_h; c.fill = fill_h; c.alignment = aln_c
-
-    # Estado y error
-    fill, font = _detail_fill(estado_fase2)
-    c_est = ws.cell(row=row_num, column=_DETAIL_COL["ESTADO F2"])
-    c_est.value = estado_fase2; c_est.fill = fill; c_est.font = font
-    c_est.alignment = Alignment(horizontal="center", vertical="center")
-
-    c_err = ws.cell(row=row_num, column=_DETAIL_COL["ERROR F2"])
-    c_err.value = error[:300] if error else ""
-    c_err.font  = Font(name="Arial", size=9)
-
-    # Valores de rates
+    global _columnas_detail
+    valores = {
+        _col_detail("ESTADO F2"): estado_fase2,
+        _col_detail("ERROR F2"):  error[:300] if error else "",
+    }
     if rangos and v_viejos and v_nuevos:
-        for i, rango in enumerate(rangos):
-            col_v = _DETAIL_RATES_START + i * 2
-            col_n = _DETAIL_RATES_START + i * 2 + 1
-            cv = ws.cell(row=row_num, column=col_v, value=v_viejos.get(rango, ""))
-            cv.font = Font(name="Arial", color="C00000", size=9)
-            cv.fill = PatternFill("solid", start_color="FFE0E0", fgColor="FFE0E0")
-            cv.alignment = Alignment(horizontal="center")
-            cn = ws.cell(row=row_num, column=col_n, value=v_nuevos.get(rango, ""))
-            cn.font = Font(name="Arial", color="375623", size=9, bold=True)
-            cn.fill = PatternFill("solid", start_color="E2EFDA", fgColor="E2EFDA")
-            cn.alignment = Alignment(horizontal="center")
+        encabezados_rate = []
+        for rango in rangos:
+            encabezados_rate.append(f"VIEJO {rango}")
+            encabezados_rate.append(f"NUEVO {rango}")
+        asegurar_columnas(_ws_detail, encabezados_rate)
+        _columnas_detail = _ws_detail.row_values(1)
+        for rango in rangos:
+            valores[f"VIEJO {rango}"] = v_viejos.get(rango, "")
+            valores[f"NUEVO {rango}"] = v_nuevos.get(rango, "")
+    actualizar_fila_sheet(_ws_detail, row_num, _columnas_detail, valores)
 
-    wb.save(EXCEL_PATH); wb.close()
+
+HEADER_ALIASES = {
+    "LOCATION": "location", "SUPPLIER": "supplier",
+    "COD ORIGEN": "cod_origen", "CODIGO ORIGEN": "cod_origen", "CODE": "cod_origen",
+    "SERVICE TYPE": "service_type", "SERVICETYPE": "service_type",
+    "TIPO SERVICIO": "service_type", "TIPO": "service_type", "SVC TYPE": "service_type",
+    "RATE FROM": "rate_from", "FROM": "rate_from", "DESDE": "rate_from",
+    "RATE TO": "rate_to", "TO": "rate_to", "HASTA": "rate_to",
+    "PRICE CODE": "price_code", "PRICECODE": "price_code", "PC": "price_code",
+    "MOSTRAR CAPTURAS": "mostrar_capturas", "CAPTURAS": "mostrar_capturas",
+    "MOSTRAR SCREENSHOTS": "mostrar_capturas", "SCREENSHOTS": "mostrar_capturas",
+    "COD DESTINO": "cod_destino", "DESTINO": "cod_destino",
+    "RATE FROM D": "rate_from_d", "RATE TO D": "rate_to_d",
+    "PCM REF": "pcm_ref", "DÍAS OP": "dias_op", "DIAS OP": "dias_op",
+    "ESTADO": "estado", "STATUS": "estado", "STATE": "estado",
+    "ERROR": "error_msg", "TIMESTAMP": "timestamp",
+}
+
+def _mapear_columnas(columnas):
+    """Traduce cada campo lógico al nombre de columna real que tiene en el
+    Sheet — por alias de encabezado, o si no por la posición fija del
+    dict C (mismo fallback que get_col() usaba con el Excel)."""
+    mapa = {}
+    for encabezado in columnas:
+        campo = HEADER_ALIASES.get(str(encabezado).strip().upper())
+        if campo and campo not in mapa:
+            mapa[campo] = encabezado
+    for campo, pos in C.items():
+        if campo not in mapa and 0 <= pos - 1 < len(columnas):
+            mapa[campo] = columnas[pos - 1]
+    return mapa
 
 
 def leer_flag_mostrar_capturas():
     """Lee la columna MOSTRAR CAPTURAS de la hoja de entrada (primer valor no
     vacío). Devuelve True sólo si dice SI/SÍ/YES/TRUE/1. Default False."""
     try:
-        wb = openpyxl.load_workbook(EXCEL_PATH, data_only=True)
-        ws = wb[SHEET] if SHEET in wb.sheetnames else wb.active
-        header = [str(c.value or "").strip().upper() for c in ws[1]]
-        idx = next((k for k, h in enumerate(header)
-                    if h in ("MOSTRAR CAPTURAS", "CAPTURAS",
-                             "MOSTRAR SCREENSHOTS", "SCREENSHOTS")), None)
-        val = ""
-        if idx is not None:
-            for row in ws.iter_rows(min_row=2):
-                if idx < len(row) and str(row[idx].value or "").strip():
-                    val = str(row[idx].value).strip().upper(); break
-        wb.close()
-        return val in ("SI", "SÍ", "S", "YES", "Y", "TRUE", "1")
+        filas, columnas = cargar_sheet(_ws)
+        col = _mapear_columnas(columnas).get("mostrar_capturas")
+        if not col:
+            return False
+        for fila in filas:
+            val = str(fila.get(col) or "").strip().upper()
+            if val:
+                return val in ("SI", "SÍ", "S", "YES", "Y", "TRUE", "1")
+        return False
     except Exception:
         return False
 
@@ -3565,138 +3385,50 @@ def leer_pendientes():
     Detecta automáticamente la columna de estado buscando el header,
     con fallback a la posición fija del diccionario C.
     """
+    global _columnas, _campo_a_columna
     ESTADOS_PENDIENTE = {"PENDIENTE", "PENDING", "PEND"}
 
-    wb = openpyxl.load_workbook(EXCEL_PATH)
-    # Buscar la hoja correcta (acepta PRODUCTOS, Sheet1, primera hoja)
-    if SHEET in wb.sheetnames:
-        ws = wb[SHEET]
-    else:
-        ws = wb.active
+    filas_sheet, _columnas = cargar_sheet(_ws)
+    _campo_a_columna = _mapear_columnas(_columnas)
 
-    # Detectar columnas por header (fila 1)
-    col_map = {}  # nombre_campo → índice base-0
-    header_row = [str(c.value or "").strip().upper() for c in ws[1]]
-    HEADER_ALIASES = {
-        "LOCATION": "location", "SUPPLIER": "supplier",
-        "COD ORIGEN": "cod_origen", "CODIGO ORIGEN": "cod_origen", "CODE": "cod_origen",
-        "SERVICE TYPE": "service_type", "SERVICETYPE": "service_type",
-        "TIPO SERVICIO": "service_type", "TIPO": "service_type", "SVC TYPE": "service_type",
-        "RATE FROM": "rate_from", "FROM": "rate_from", "DESDE": "rate_from",
-        "RATE TO": "rate_to", "TO": "rate_to", "HASTA": "rate_to",
-        "PRICE CODE": "price_code", "PRICECODE": "price_code", "PC": "price_code",
-        "MOSTRAR CAPTURAS": "mostrar_capturas", "CAPTURAS": "mostrar_capturas",
-        "MOSTRAR SCREENSHOTS": "mostrar_capturas", "SCREENSHOTS": "mostrar_capturas",
-        "COD DESTINO": "cod_destino", "DESTINO": "cod_destino",
-        "RATE FROM D": "rate_from_d", "RATE TO D": "rate_to_d",
-        "PCM REF": "pcm_ref", "DÍAS OP": "dias_op", "DIAS OP": "dias_op",
-        "ESTADO": "estado", "STATUS": "estado", "STATE": "estado",
-        "ERROR": "error_msg", "TIMESTAMP": "timestamp",
-    }
-    for idx, h in enumerate(header_row):
-        campo = HEADER_ALIASES.get(h)
-        if campo and campo not in col_map:
-            col_map[campo] = idx
-
-    # Para campos no detectados por header, usar posición fija de C
-    def get_col(campo):
-        return col_map.get(campo, C[campo] - 1)
-
-    # Índice de columna de estado
-    idx_estado = get_col("estado")
-
+    col_estado = _campo_a_columna.get("estado")
     filas = []
-    for i, row in enumerate(ws.iter_rows(min_row=2), start=2):
-        if idx_estado >= len(row):
-            continue
-        est = str(row[idx_estado].value or "").strip().upper()
+    for fila in filas_sheet:
+        est = str(fila.get(col_estado) or "").strip().upper()
         if est in ESTADOS_PENDIENTE:
-            d = {}
-            for campo in C:
-                ci = get_col(campo)
-                d[campo] = row[ci].value if ci < len(row) else None
-            d["_row"] = i
+            d = {campo: fila.get(col) for campo, col in _campo_a_columna.items()}
+            d["_row"] = fila["__row_idx__"]
             filas.append(d)
-
-    wb.close()
     return filas
 
-def _estilo_estado(estado):
-    if estado == "OK":
-        return (PatternFill("solid", start_color="E2EFDA", fgColor="E2EFDA"),
-                Font(name="Arial", bold=True, color="375623", size=9))
-    elif estado == "ERROR":
-        return (PatternFill("solid", start_color="FFE0E0", fgColor="FFE0E0"),
-                Font(name="Arial", bold=True, color="C00000", size=9))
-    return (PatternFill("solid", start_color="FFF2CC", fgColor="FFF2CC"),
-            Font(name="Arial", bold=True, color="7F6000", size=9))
-
 def marcar_procesando(row_num):
-    wb = openpyxl.load_workbook(EXCEL_PATH)
-    ws = wb[SHEET]
-    c = ws.cell(row=row_num, column=C["estado"])
-    fill, font = _estilo_estado("PROCESANDO")
-    c.value = "PROCESANDO"; c.fill = fill; c.font = font
-    wb.save(EXCEL_PATH); wb.close()
+    col_estado = _campo_a_columna["estado"]
+    actualizar_fila_sheet(_ws, row_num, _columnas, {col_estado: "PROCESANDO"})
 
 def escribir_resultado(row_num, estado, pcm_ref="", dias_op="",
                        rangos=None, v_viejos=None, v_nuevos=None,
                        error=""):
-    wb = openpyxl.load_workbook(EXCEL_PATH)
-    ws = wb[SHEET]
-
-    # Asegurar headers de rates dinámicos en fila 1
-    if rangos:
-        for i, rango in enumerate(rangos):
-            col_v = RATES_START + i * 2
-            col_n = RATES_START + i * 2 + 1
-            # Header viejo
-            cv = ws.cell(row=1, column=col_v)
-            cv.value = f"VIEJO {rango}"
-            cv.font  = Font(name="Arial", bold=True, color="C00000", size=8)
-            cv.fill  = PatternFill("solid", start_color="FFE0E0", fgColor="FFE0E0")
-            cv.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            # Header nuevo
-            cn = ws.cell(row=1, column=col_n)
-            cn.value = f"NUEVO {rango}"
-            cn.font  = Font(name="Arial", bold=True, color="375623", size=8)
-            cn.fill  = PatternFill("solid", start_color="E2EFDA", fgColor="E2EFDA")
-            cn.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    # Valores de rates
+    global _columnas
+    valores = {
+        _campo_a_columna["pcm_ref"]:   pcm_ref,
+        _campo_a_columna["dias_op"]:   dias_op,
+        _campo_a_columna["timestamp"]: datetime.now().strftime("%Y-%m-%d %H:%M"),
+        _campo_a_columna["error_msg"]: error[:300] if error else "",
+        _campo_a_columna["estado"]:    estado,
+    }
     if rangos and v_viejos and v_nuevos:
-        for i, rango in enumerate(rangos):
-            col_v = RATES_START + i * 2
-            col_n = RATES_START + i * 2 + 1
-            cv = ws.cell(row=row_num, column=col_v)
-            cv.value = v_viejos.get(rango, "")
-            cv.font  = Font(name="Arial", color="C00000", size=9)
-            cv.fill  = PatternFill("solid", start_color="FFE0E0", fgColor="FFE0E0")
-            cv.alignment = Alignment(horizontal="center")
-            cn = ws.cell(row=row_num, column=col_n)
-            cn.value = v_nuevos.get(rango, "")
-            cn.font  = Font(name="Arial", color="375623", size=9, bold=True)
-            cn.fill  = PatternFill("solid", start_color="E2EFDA", fgColor="E2EFDA")
-            cn.alignment = Alignment(horizontal="center")
+        encabezados_rate = []
+        for rango in rangos:
+            encabezados_rate.append(f"VIEJO {rango}")
+            encabezados_rate.append(f"NUEVO {rango}")
+        asegurar_columnas(_ws, encabezados_rate)
+        _columnas = _ws.row_values(1)
+        for rango in rangos:
+            valores[f"VIEJO {rango}"] = v_viejos.get(rango, "")
+            valores[f"NUEVO {rango}"] = v_nuevos.get(rango, "")
+    actualizar_fila_sheet(_ws, row_num, _columnas, valores)
 
-    # PCM REF: un PCM por línea dentro de la celda (legible). El valor llega
-    # con saltos de línea desde _procesar_periodo_fase1.
-    c_pcmref = ws.cell(row=row_num, column=C["pcm_ref"])
-    c_pcmref.value = pcm_ref
-    c_pcmref.alignment = Alignment(wrap_text=True, vertical="top")
-    ws.column_dimensions[get_column_letter(C["pcm_ref"])].width = 30
-    ws.cell(row=row_num, column=C["dias_op"]).value   = dias_op
-    ws.cell(row=row_num, column=C["timestamp"]).value = datetime.now().strftime("%Y-%m-%d %H:%M")
-    ws.cell(row=row_num, column=C["error_msg"]).value = error[:300] if error else ""
-
-    c_est = ws.cell(row=row_num, column=C["estado"])
-    fill, font = _estilo_estado(estado)
-    c_est.value = estado; c_est.fill = fill; c_est.font = font
-    c_est.alignment = Alignment(horizontal="center", vertical="center")
-
-    wb.save(EXCEL_PATH); wb.close()
-
-# ── Procesar una fila del Excel ───────────────────────────────
+# ── Procesar una fila del Sheet ────────────────────────────────
 def _buscar_componente_fase1(driver, fila):
     """
     Busca el componente origen UNA VEZ (Product Search + días de operación +
@@ -4001,28 +3733,11 @@ print(f"  TOURPLAN NX — VALORIZACIÓN PKG  v{VERSION}  [MODO={MODO}]")
 print(f"  📌 VERSION {VERSION}  ·  {VERSION_FECHA}")
 print("="*60)
 
-_recien_creado = crear_excel_si_no_existe()
-print(f"📄 Excel: {EXCEL_PATH}  (existía: {'NO, se creó plantilla' if _recien_creado else 'sí'})")
+if not SHEET_URL:
+    raise ValueError("No se indicó la URL del Google Sheet (TOURPLAN_SHEET_URL).")
 
-if not os.path.exists(EXCEL_PATH):
-    raise FileNotFoundError(EXCEL_PATH)
-
-if _recien_creado:
-    print("\n" + "="*60)
-    print("⛔ NO HABÍA EXCEL — se creó una PLANTILLA vacía (fila de ejemplo).")
-    print(f"   Ruta: {EXCEL_PATH}")
-    print("   1) Completá tus filas con ESTADO=PENDIENTE (o subí tu Excel a esa")
-    print("      ruta). Recordá: Colab borra /content al reiniciar → re-subilo.")
-    print("   2) Volvé a correr la celda.")
-    print("="*60)
-    raise SystemExit("Excel recién creado: cargá tus datos y volvé a correr.")
-
-# Asegurar hoja PCM_Detail con columnas nuevas y comentarios de ayuda en los
-# headers, aunque el Excel ya existiera
-_wb_tmp = openpyxl.load_workbook(EXCEL_PATH)
-_init_pcm_detail_sheet(_wb_tmp)
-_aplicar_comentarios_excel(_wb_tmp)
-_wb_tmp.save(EXCEL_PATH); _wb_tmp.close()
+conectar_sheets_pkg()
+print(f"📄 Sheet: {SHEET_URL}")
 
 # Flag global: mostrar capturas inline (default NO → corre más rápido)
 MOSTRAR_CAPTURAS = leer_flag_mostrar_capturas()
@@ -4046,10 +3761,9 @@ for f in pendientes_f1:
 
 if not pendientes_f1 and not pendientes_f2:
     print("\n" + "="*60)
-    print("⛔ EL EXCEL NO TIENE FILAS PENDIENTE.")
-    print(f"   Ruta: {EXCEL_PATH}")
+    print("⛔ EL SHEET NO TIENE FILAS PENDIENTE.")
     print("   Poné ESTADO=PENDIENTE en las filas a procesar (hoja PRODUCTOS para")
-    print("   Fase 1) y volvé a correr. Verificá que estás editando ESTE archivo.")
+    print("   Fase 1) y volvé a correr. Verificá que estás editando ESTE Sheet.")
     print("="*60)
     raise SystemExit("Sin filas PENDIENTE: cargá ESTADO=PENDIENTE y volvé a correr.")
 else:
@@ -4195,10 +3909,3 @@ else:
 
     if _abortado:
         sys.exit(ABORT_EXIT_CODE)
-
-    try:
-        from google.colab import files
-        files.download(EXCEL_PATH)
-        print("📥 Excel descargado.")
-    except Exception:
-        pass
