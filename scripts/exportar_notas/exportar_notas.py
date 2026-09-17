@@ -104,8 +104,15 @@ VERSION_FECHA = "2026-09-01"
 # ── CONFIGURACIÓN — via variables de entorno (con default = valor original) ──
 import os
 
-EXCEL_PATH = os.environ.get("TOURPLAN_EXCEL_PATH", "/content/EXPORTAR_NOTAS_input.xlsx")
-HOJA       = os.environ.get("TOURPLAN_HOJA", "EXPORTAR_NOTAS")
+from common.user_config import (
+    CREDENTIALS_PATH as _CREDENTIALS_PATH_DEFAULT,
+    TOKEN_PATH as _TOKEN_PATH_DEFAULT,
+)
+
+SHEET_URL        = os.environ.get("TOURPLAN_SHEET_URL", "")
+HOJA             = os.environ.get("TOURPLAN_HOJA", "EXPORTAR_NOTAS")
+CREDENTIALS_PATH = os.environ.get("TOURPLAN_CREDENTIALS_PATH", _CREDENTIALS_PATH_DEFAULT)
+TOKEN_PATH       = os.environ.get("TOURPLAN_TOKEN_PATH", _TOKEN_PATH_DEFAULT)
 
 USERNAME   = os.environ.get("TOURPLAN_USERNAME", "poner minusculas")
 PASSWORD   = os.environ.get("TOURPLAN_PASSWORD", "password")
@@ -115,6 +122,7 @@ PASSWORD   = os.environ.get("TOURPLAN_PASSWORD", "password")
 BASE_URL   = os.environ.get("TOURPLAN_BASE_URL", "https://tourplannx.eurotur.com.ar/TourplanNX_Test")
 
 SS_DIR     = os.environ.get("TOURPLAN_SS_DIR", "/content/screenshots")
+HEADLESS   = os.environ.get("TOURPLAN_HEADLESS", "0").strip() in ("1", "true", "True")
 
 # Multiplicador de tiempos de espera. Producción por default — Tourplan
 # responde más lento ahí que en Test (mismo criterio que el resto de los
@@ -135,8 +143,9 @@ print("🔧 Verificando entorno...\n")
 
 _PIPS_NEEDED = {
     "selenium": "selenium",
-    "openpyxl": "openpyxl",
     "webdriver_manager": "webdriver-manager",
+    "gspread": "gspread",
+    "google_auth_oauthlib": "google-auth-oauthlib",
 }
 _faltantes = [pkg for mod, pkg in _PIPS_NEEDED.items()
               if importlib.util.find_spec(mod) is None]
@@ -154,10 +163,11 @@ else:
 from common.chrome_bootstrap import find_or_prepare_chrome
 # Botón Abortar de la app (ver common/abort.py)
 from common.abort import chequear_abort, AbortadoPorUsuario, ABORT_EXIT_CODE
+# Google Sheets como cola de trabajo (ver common/sheets_client.py)
+from common.sheets_client import conectar_sheets, cargar_sheet, actualizar_fila_sheet
 
 CHROMIUM_BIN, ver_chrome = find_or_prepare_chrome()
 
-import openpyxl
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -283,9 +293,11 @@ def crear_driver():
     import tempfile
 
     opts = Options()
-    # Sin --headless: esto corre en la PC de la persona (con pantalla), no en
-    # el contenedor sin pantalla de Colab. Además, varias empresas bloquean
-    # el modo headless de Chrome por política de seguridad.
+    # Sin ventana visible solo si se pide explícitamente (TOURPLAN_HEADLESS,
+    # checkbox en Configuración) — por default corre con ventana real en la
+    # PC de la persona, a diferencia del contenedor sin pantalla de Colab.
+    if HEADLESS:
+        opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1704,1012")
@@ -1025,33 +1037,24 @@ def html_a_texto_plano(contenido_html):
     return texto.strip()
 
 
-# ── Excel — I/O ─────────────────────────────────────────────────
-def load_excel(path, hoja):
-    wb = openpyxl.load_workbook(path)
-    ws = wb[hoja]
-    headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
-    col_idx = {h: i + 1 for i, h in enumerate(headers) if h}
-    rows = []
-    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        if not any(row):
-            continue
-        d = dict(zip(headers, row))
-        d["__row_idx__"] = row_idx
-        rows.append(d)
-    print(f"Excel cargado: {len(rows)} fila(s) en '{hoja}'")
-    return wb, rows, col_idx
+# ── Sheet — I/O ───────────────────────────────────────────────
+def load_sheet(hoja):
+    ws = conectar_sheets(SHEET_URL, hoja, CREDENTIALS_PATH, TOKEN_PATH)
+    rows, columnas = cargar_sheet(ws)
+    print(f"Sheet cargado: {len(rows)} fila(s) en '{hoja}'")
+    return ws, rows, columnas
 
 
-def update_row(wb, row_idx, col_idx, path, hoja, estado=None, detalle=None, texto_exportado=None):
-    """Guarda INMEDIATAMENTE tras cada fila — no acumular para el final."""
-    ws = wb[hoja]
+def update_row(ws, row_idx, columnas, estado=None, detalle=None, texto_exportado=None):
+    """Escribe INMEDIATAMENTE tras cada fila — no acumular para el final."""
+    valores = {}
     if estado is not None:
-        ws.cell(row=row_idx, column=col_idx["ESTADO"]).value = estado
-    if detalle is not None and "DETALLE_PROCESO" in col_idx:
-        ws.cell(row=row_idx, column=col_idx["DETALLE_PROCESO"]).value = detalle
-    if texto_exportado is not None and "Texto_Exportado" in col_idx:
-        ws.cell(row=row_idx, column=col_idx["Texto_Exportado"]).value = texto_exportado
-    wb.save(path)
+        valores["ESTADO"] = estado
+    if detalle is not None and "DETALLE_PROCESO" in columnas:
+        valores["DETALLE_PROCESO"] = detalle
+    if texto_exportado is not None and "Texto_Exportado" in columnas:
+        valores["Texto_Exportado"] = texto_exportado
+    actualizar_fila_sheet(ws, row_idx, columnas, valores)
 
 
 # ── Agrupar filas por producto (encadenamiento) ──────────────────
@@ -1170,10 +1173,10 @@ def main():
 
     t_inicio = time.time()
 
-    if not os.path.exists(EXCEL_PATH):
-        raise FileNotFoundError(f"No encontré el Excel en {EXCEL_PATH} — subilo primero")
+    if not SHEET_URL:
+        raise ValueError("No se indicó la URL del Google Sheet (TOURPLAN_SHEET_URL).")
 
-    wb, rows, col_idx = load_excel(EXCEL_PATH, HOJA)
+    ws, rows, columnas = load_sheet(HOJA)
     pendientes = [r for r in rows
                   if str(r.get("ESTADO") or "").strip().upper() == "PENDIENTE"]
 
@@ -1209,7 +1212,7 @@ def main():
                 estado = f"ERROR: producto no encontrado — {e}"
                 for row in grupo:
                     print(f"  Estado: {estado}")
-                    update_row(wb, row["__row_idx__"], col_idx, EXCEL_PATH, HOJA,
+                    update_row(ws, row["__row_idx__"], columnas,
                                estado=estado, detalle=None)
                 continue
             except Exception as e:
@@ -1217,7 +1220,7 @@ def main():
                 estado = f"ERROR: falla buscando/abriendo producto — {e}"
                 for row in grupo:
                     print(f"  Estado: {estado}")
-                    update_row(wb, row["__row_idx__"], col_idx, EXCEL_PATH, HOJA,
+                    update_row(ws, row["__row_idx__"], columnas,
                                estado=estado, detalle=None)
                 continue
 
@@ -1239,7 +1242,7 @@ def main():
                     detalle = traceback.format_exc(limit=3)
 
                 print(f"  Estado: {estado}" + (f" — {detalle}" if detalle else ""))
-                update_row(wb, row_idx, col_idx, EXCEL_PATH, HOJA,
+                update_row(ws, row_idx, columnas,
                            estado=estado, detalle=detalle, texto_exportado=texto_exportado)
 
                 # Re-sincronización: process_nota() ya se encarga de cerrar
@@ -1272,8 +1275,8 @@ def main():
                                              f"Notes tras la nota anterior — {e2}")
                             for row_restante in grupo[i + 1:]:
                                 print(f"  Estado: {estado_resync}")
-                                update_row(wb, row_restante["__row_idx__"], col_idx,
-                                           EXCEL_PATH, HOJA, estado=estado_resync, detalle=None)
+                                update_row(ws, row_restante["__row_idx__"], columnas,
+                                           estado=estado_resync, detalle=None)
                             break
 
     except AbortadoPorUsuario:
@@ -1286,7 +1289,7 @@ def main():
         dur = int(time.time() - t_inicio)
         m, s = divmod(dur, 60)
         print(f"\n🏁 Fin. Duración: {m}m {s:02d}s")
-        print(f"📄 Excel: {EXCEL_PATH}")
+        print(f"📄 Sheet: {SHEET_URL}")
         print(f"📂 Screenshots: {SS_DIR}")
 
     if _abortado:
@@ -1295,10 +1298,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-try:
-    from google.colab import files
-    files.download(EXCEL_PATH)
-    print("📥 Excel descargado.")
-except Exception:
-    pass
