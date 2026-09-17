@@ -259,6 +259,11 @@ VERSION_FECHA = "2026-09-08"
 # ── CONFIGURACIÓN — via variables de entorno (con default = valor original) ──
 import os
 
+from common.user_config import (
+    CREDENTIALS_PATH as _CREDENTIALS_PATH_DEFAULT,
+    TOKEN_PATH as _TOKEN_PATH_DEFAULT,
+)
+
 MODO       = os.environ.get("TOURPLAN_MODO", "lectura")  # "lectura" (dry-run, no escribe nada en Tourplan)
                                                            # "aplicar"/cualquier otro valor = ejecuta los cambios
 EDICION    = os.environ.get("TOURPLAN_EDICION", "NO")    # Global para toda la corrida, NO varía por fila.
@@ -268,8 +273,10 @@ EDICION    = os.environ.get("TOURPLAN_EDICION", "NO")    # Global para toda la c
                            #       pero antes se lee y guarda el contenido
                            #       anterior en CONTENIDO_ANTERIOR.
 
-EXCEL_PATH = os.environ.get("TOURPLAN_EXCEL_PATH", "/content/NOTAS_SRV_input.xlsx")
-HOJA       = os.environ.get("TOURPLAN_HOJA", "NOTAS_SRV")
+SHEET_URL        = os.environ.get("TOURPLAN_SHEET_URL", "")
+HOJA             = os.environ.get("TOURPLAN_HOJA", "NOTAS_SRV")
+CREDENTIALS_PATH = os.environ.get("TOURPLAN_CREDENTIALS_PATH", _CREDENTIALS_PATH_DEFAULT)
+TOKEN_PATH       = os.environ.get("TOURPLAN_TOKEN_PATH", _TOKEN_PATH_DEFAULT)
 
 USERNAME   = os.environ.get("TOURPLAN_USERNAME", "poner minusculas")
 PASSWORD   = os.environ.get("TOURPLAN_PASSWORD", "password")
@@ -279,6 +286,7 @@ PASSWORD   = os.environ.get("TOURPLAN_PASSWORD", "password")
 BASE_URL   = os.environ.get("TOURPLAN_BASE_URL", "https://tourplannx.eurotur.com.ar/TourplanNX_Test")
 
 SS_DIR     = os.environ.get("TOURPLAN_SS_DIR", "/content/screenshots")
+HEADLESS   = os.environ.get("TOURPLAN_HEADLESS", "0").strip() in ("1", "true", "True")
 
 # Multiplicador de tiempos de espera. Producción por default — Tourplan
 # responde más lento ahí que en Test (mismo criterio que el resto de los
@@ -307,8 +315,9 @@ print("🔧 Verificando entorno...\n")
 
 _PIPS_NEEDED = {
     "selenium": "selenium",
-    "openpyxl": "openpyxl",
     "webdriver_manager": "webdriver-manager",
+    "gspread": "gspread",
+    "google_auth_oauthlib": "google-auth-oauthlib",
 }
 _faltantes = [pkg for mod, pkg in _PIPS_NEEDED.items()
               if importlib.util.find_spec(mod) is None]
@@ -326,10 +335,11 @@ else:
 from common.chrome_bootstrap import find_or_prepare_chrome
 # Botón Abortar de la app (ver common/abort.py)
 from common.abort import chequear_abort, AbortadoPorUsuario, ABORT_EXIT_CODE
+# Google Sheets como cola de trabajo (ver common/sheets_client.py)
+from common.sheets_client import conectar_sheets, cargar_sheet, actualizar_fila_sheet
 
 CHROMIUM_BIN, ver_chrome = find_or_prepare_chrome()
 
-import openpyxl
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -569,9 +579,11 @@ def crear_driver():
     import tempfile
 
     opts = Options()
-    # Sin --headless: esto corre en la PC de la persona (con pantalla), no en
-    # el contenedor sin pantalla de Colab. Además, varias empresas bloquean
-    # el modo headless de Chrome por política de seguridad.
+    # Sin ventana visible solo si se pide explícitamente (TOURPLAN_HEADLESS,
+    # checkbox en Configuración) — por default corre con ventana real en la
+    # PC de la persona, a diferencia del contenedor sin pantalla de Colab.
+    if HEADLESS:
+        opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1704,1012")
@@ -1569,33 +1581,24 @@ def esperar_cierre_editor(driver, timeout=10):
     return False
 
 
-# ── Excel — I/O ─────────────────────────────────────────────────
-def load_excel(path, hoja):
-    wb = openpyxl.load_workbook(path)
-    ws = wb[hoja]
-    headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
-    col_idx = {h: i + 1 for i, h in enumerate(headers) if h}
-    rows = []
-    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        if not any(row):
-            continue
-        d = dict(zip(headers, row))
-        d["__row_idx__"] = row_idx
-        rows.append(d)
-    print(f"Excel cargado: {len(rows)} fila(s) en '{hoja}'")
-    return wb, rows, col_idx
+# ── Sheet — I/O ───────────────────────────────────────────────
+def load_sheet(hoja):
+    ws = conectar_sheets(SHEET_URL, hoja, CREDENTIALS_PATH, TOKEN_PATH)
+    rows, columnas = cargar_sheet(ws)
+    print(f"Sheet cargado: {len(rows)} fila(s) en '{hoja}'")
+    return ws, rows, columnas
 
 
-def update_row(wb, row_idx, col_idx, path, hoja, estado=None, detalle=None, contenido_anterior=None):
-    """Guarda INMEDIATAMENTE tras cada fila — no acumular para el final."""
-    ws = wb[hoja]
+def update_row(ws, row_idx, columnas, estado=None, detalle=None, contenido_anterior=None):
+    """Escribe INMEDIATAMENTE tras cada fila — no acumular para el final."""
+    valores = {}
     if estado is not None:
-        ws.cell(row=row_idx, column=col_idx["ESTADO"]).value = estado
-    if detalle is not None and "DETALLE_PROCESO" in col_idx:
-        ws.cell(row=row_idx, column=col_idx["DETALLE_PROCESO"]).value = detalle
-    if contenido_anterior is not None and "CONTENIDO_ANTERIOR" in col_idx:
-        ws.cell(row=row_idx, column=col_idx["CONTENIDO_ANTERIOR"]).value = contenido_anterior
-    wb.save(path)
+        valores["ESTADO"] = estado
+    if detalle is not None and "DETALLE_PROCESO" in columnas:
+        valores["DETALLE_PROCESO"] = detalle
+    if contenido_anterior is not None and "CONTENIDO_ANTERIOR" in columnas:
+        valores["CONTENIDO_ANTERIOR"] = contenido_anterior
+    actualizar_fila_sheet(ws, row_idx, columnas, valores)
 
 
 # ── Agrupar filas por producto (encadenamiento) ──────────────────
@@ -1635,7 +1638,7 @@ def _buscar_y_abrir_producto(driver, location, supplier, code, service_type):
     abrir_product_notes(driver)
 
 
-def verificar_notas_guardadas(driver, wb, col_idx, filas):
+def verificar_notas_guardadas(driver, ws, columnas, filas):
     """
     SEGUNDA PASADA, después de terminar TODO el guardado — SOLO
     diagnóstico, no cambia el ESTADO de ninguna fila. A pedido explícito de
@@ -1691,7 +1694,7 @@ def verificar_notas_guardadas(driver, wb, col_idx, filas):
         except Exception as e:
             print(f"    ⚠ No se pudo recargar {location}/{supplier}/{code} para validar — {e}")
             for row in grupo:
-                _agregar_detalle_validacion(wb, col_idx, row["__row_idx__"],
+                _agregar_detalle_validacion(ws, columnas, row["__row_idx__"],
                                              f"[VALIDACIÓN UPDATED] no se pudo recargar el producto — {e}")
             continue
 
@@ -1715,20 +1718,19 @@ def verificar_notas_guardadas(driver, wb, col_idx, filas):
                         f"CREATED={nota['created']} ({nota['created_by']}) "
                         f"UPDATED={nota['updated']} ({nota['updated_by']})")
             print(f"  Fila {row_idx}: {detalle_validacion}")
-            _agregar_detalle_validacion(wb, col_idx, row_idx, detalle_validacion)
+            _agregar_detalle_validacion(ws, columnas, row_idx, detalle_validacion)
 
 
-def _agregar_detalle_validacion(wb, col_idx, row_idx, detalle_validacion):
+def _agregar_detalle_validacion(ws, columnas, row_idx, detalle_validacion):
     """Agrega `detalle_validacion` al DETALLE_PROCESO ya escrito en la
     primera pasada, en vez de pisarlo — lee el valor actual de la celda
-    directo del workbook (ya en memoria, wb.save() de update_row() ya lo
-    persistió a disco en la primera pasada)."""
-    ws = wb[HOJA]
-    if "DETALLE_PROCESO" not in col_idx:
+    directo del Sheet antes de escribir la versión combinada."""
+    if "DETALLE_PROCESO" not in columnas:
         return
-    actual = ws.cell(row=row_idx, column=col_idx["DETALLE_PROCESO"]).value
+    col_num = columnas.index("DETALLE_PROCESO") + 1
+    actual = ws.cell(row_idx, col_num).value
     nuevo = f"{actual} | {detalle_validacion}" if actual else detalle_validacion
-    update_row(wb, row_idx, col_idx, EXCEL_PATH, HOJA, detalle=nuevo)
+    update_row(ws, row_idx, columnas, detalle=nuevo)
 
 
 # ── Procesamiento de una nota, sobre un producto ya abierto ──────
@@ -1857,10 +1859,10 @@ def main():
 
     t_inicio = time.time()
 
-    if not os.path.exists(EXCEL_PATH):
-        raise FileNotFoundError(f"No encontré el Excel en {EXCEL_PATH} — subilo primero")
+    if not SHEET_URL:
+        raise ValueError("No se indicó la URL del Google Sheet (TOURPLAN_SHEET_URL).")
 
-    wb, rows, col_idx = load_excel(EXCEL_PATH, HOJA)
+    ws, rows, columnas = load_sheet(HOJA)
     pendientes = [r for r in rows
                   if str(r.get("ESTADO") or "").strip().upper() == "PENDIENTE"]
 
@@ -1897,7 +1899,7 @@ def main():
                 estado = f"ERROR: producto no encontrado — {e}"
                 for row in grupo:
                     print(f"  Estado: {estado}")
-                    update_row(wb, row["__row_idx__"], col_idx, EXCEL_PATH, HOJA,
+                    update_row(ws, row["__row_idx__"], columnas,
                                estado=estado, detalle=None)
                 continue
             except Exception as e:
@@ -1905,7 +1907,7 @@ def main():
                 estado = f"ERROR: falla buscando/abriendo producto — {e}"
                 for row in grupo:
                     print(f"  Estado: {estado}")
-                    update_row(wb, row["__row_idx__"], col_idx, EXCEL_PATH, HOJA,
+                    update_row(ws, row["__row_idx__"], columnas,
                                estado=estado, detalle=None)
                 continue
 
@@ -1927,7 +1929,7 @@ def main():
                     detalle = traceback.format_exc(limit=3)
 
                 print(f"  Estado: {estado}" + (f" — {detalle}" if detalle else ""))
-                update_row(wb, row_idx, col_idx, EXCEL_PATH, HOJA,
+                update_row(ws, row_idx, columnas,
                            estado=estado, detalle=detalle, contenido_anterior=contenido_anterior)
 
                 if estado in ("INSERTADA", "EDITADA"):
@@ -1955,15 +1957,15 @@ def main():
                                          f"tras falla de nota — {e}")
                         for row_restante in grupo[i + 1:]:
                             print(f"  Estado: {estado_resync}")
-                            update_row(wb, row_restante["__row_idx__"], col_idx,
-                                       EXCEL_PATH, HOJA, estado=estado_resync, detalle=None)
+                            update_row(ws, row_restante["__row_idx__"], columnas,
+                                       estado=estado_resync, detalle=None)
                         break
 
         # Segunda pasada, DESPUÉS de terminar todo el guardado — ver
         # verificar_notas_guardadas(). Separada a propósito del loop de
         # arriba para no romper su encadenamiento por producto con una
         # recarga por cada nota individual.
-        verificar_notas_guardadas(driver, wb, col_idx, filas_para_validar)
+        verificar_notas_guardadas(driver, ws, columnas, filas_para_validar)
 
     except AbortadoPorUsuario:
         _abortado = True
@@ -1975,7 +1977,7 @@ def main():
         dur = int(time.time() - t_inicio)
         m, s = divmod(dur, 60)
         print(f"\n🏁 Fin. Duración: {m}m {s:02d}s")
-        print(f"📄 Excel: {EXCEL_PATH}")
+        print(f"📄 Sheet: {SHEET_URL}")
         print(f"📂 Screenshots: {SS_DIR}")
 
     if _abortado:
@@ -1984,10 +1986,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-try:
-    from google.colab import files
-    files.download(EXCEL_PATH)
-    print("📥 Excel descargado.")
-except Exception:
-    pass
