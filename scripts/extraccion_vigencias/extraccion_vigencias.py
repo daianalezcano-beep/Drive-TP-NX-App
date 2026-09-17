@@ -51,7 +51,7 @@
 #     - RATE FROM/RATE TO completos → se exportan TODOS los períodos
 #       que se solapen con ese rango (puede ser más de uno).
 #
-#   COLA DE TRABAJO EXCEL (openpyxl, ESTADO/OBSERVACIONES, guardado fila
+#   COLA DE TRABAJO GOOGLE SHEETS (ESTADO/OBSERVACIONES, guardado fila
 #   a fila, resumible) — ver skill armando-excel-como-cola-de-trabajo.
 #   Hoja "PRODUCTOS" (entrada): LOCATION, SUPPLIER, SERVICE TYPE, CODIGO,
 #   RATE FROM, RATE TO, ESTADO, OBSERVACIONES, TIMESTAMP. Ninguno de
@@ -73,7 +73,8 @@ print("🔧 Verificando entorno...\n")
 _PIPS_NEEDED = {
     "selenium":          "selenium",
     "webdriver_manager": "webdriver-manager",
-    "openpyxl":          "openpyxl",
+    "gspread":             "gspread",
+    "google_auth_oauthlib": "google-auth-oauthlib",
 }
 _pips_faltantes = [pkg for mod, pkg in _PIPS_NEEDED.items()
                    if importlib.util.find_spec(mod) is None]
@@ -85,6 +86,11 @@ if _pips_faltantes:
 # tenía sentido en el contenedor Linux de Colab.
 from common.chrome_bootstrap import find_or_prepare_chrome
 from common.abort import chequear_abort, AbortadoPorUsuario, ABORT_EXIT_CODE
+from common.sheets_client import conectar_sheets, cargar_sheet, actualizar_fila_sheet
+from common.user_config import (
+    CREDENTIALS_PATH as _CREDENTIALS_PATH_DEFAULT,
+    TOKEN_PATH as _TOKEN_PATH_DEFAULT,
+)
 
 CHROMIUM_BIN, ver_chrome = find_or_prepare_chrome()
 
@@ -96,20 +102,19 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.keys import Keys
 from webdriver_manager.chrome import ChromeDriverManager
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font
-from openpyxl.comments import Comment
-from openpyxl.utils import get_column_letter
 
 # ── Config — via variables de entorno (con default = valor original) ──
 USERNAME       = os.environ.get("TOURPLAN_USERNAME", "poner minusculas")
 PASSWORD       = os.environ.get("TOURPLAN_PASSWORD", "password")
 BASE_URL       = os.environ.get("TOURPLAN_BASE_URL", "https://tourplannx.eurotur.com.ar/TourplanNX_Test")
 
-EXCEL_PATH     = os.environ.get("TOURPLAN_EXCEL_PATH", "extraccion_vigencias.xlsx")
+SHEET_URL      = os.environ.get("TOURPLAN_SHEET_URL", "")
 HOJA_PRODUCTOS = os.environ.get("TOURPLAN_HOJA", "PRODUCTOS")
 HOJA_VIGENCIAS = "VIGENCIAS"
+CREDENTIALS_PATH = os.environ.get("TOURPLAN_CREDENTIALS_PATH", _CREDENTIALS_PATH_DEFAULT)
+TOKEN_PATH       = os.environ.get("TOURPLAN_TOKEN_PATH", _TOKEN_PATH_DEFAULT)
 SS_DIR         = os.environ.get("TOURPLAN_SS_DIR", "screenshots")
+HEADLESS       = os.environ.get("TOURPLAN_HEADLESS", "0").strip() in ("1", "true", "True")
 os.makedirs(SS_DIR, exist_ok=True)
 
 # Límite de filas PENDIENTE de PRODUCTOS a procesar en esta corrida (0 =
@@ -179,9 +184,11 @@ def crear_driver():
     import tempfile
 
     opts = Options()
-    # Sin --headless: esto corre en la PC de la persona (con pantalla), no en
-    # el contenedor sin pantalla de Colab. Ademas, varias empresas bloquean
-    # el modo headless de Chrome por politica de seguridad.
+    # Sin ventana visible solo si se pide explícitamente (TOURPLAN_HEADLESS,
+    # checkbox en Configuración) — por default corre con ventana real en la
+    # PC de la persona, a diferencia del contenedor sin pantalla de Colab.
+    if HEADLESS:
+        opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1366,911")
@@ -852,7 +859,7 @@ def leer_vigencias_codigo(driver, codigo):
     return periodos
 
 
-# ── Excel como cola de trabajo (ver skill armando-excel-como-cola-de-trabajo) ──
+# ── Sheets como cola de trabajo (ver skill armando-excel-como-cola-de-trabajo) ──
 
 VIGENCIAS_HEADERS = [
     "TIMESTAMP", "LOCATION", "SUPPLIER", "SERVICE TYPE", "CODIGO",
@@ -860,102 +867,45 @@ VIGENCIAS_HEADERS = [
     "RATE STATUS", "RATE TEXT", "RATE NAME",
 ]
 
-_COMENTARIOS_PRODUCTOS = {
-    "LOCATION": "ENTRADA (opcional). Location del producto en Tourplan (ej. BUE). "
-                "Vacío = no se filtra por location. Ver CODIGO para la regla de "
-                "mínimo de campos.",
-    "SUPPLIER": "ENTRADA (opcional). Código del supplier (ej. 1MAD01). Vacío = no "
-                "se filtra por supplier. Ver CODIGO para la regla de mínimo de campos.",
-    "SERVICE TYPE": "ENTRADA (opcional). Sigla del service type (ej. HT, TF, EX). "
-                    "Vacío = no se filtra por service type. Ver CODIGO para la "
-                    "regla de mínimo de campos.",
-    "CODIGO": "ENTRADA (opcional). Product code puntual. Vacío = releva TODOS los "
-              "códigos que matcheen los demás campos (listar_codigos_supplier). "
-              "Ningún campo de LOCATION/SUPPLIER/SERVICE TYPE/CODIGO es obligatorio "
-              "por sí solo, pero deben venir completos AL MENOS 2 de estos 4 "
-              "(cualquier combinación, ej. SERVICE TYPE+LOCATION o SUPPLIER+CODIGO) "
-              "— si no, la fila termina en ERROR sin buscar en Tourplan.",
-    "RATE FROM": "ENTRADA (opcional, dd/mm/yyyy). Junto con RATE TO define un rango: "
-                 "se exportan TODOS los períodos que se solapen con él. Si ambos "
-                 "quedan vacíos, se exporta sólo el primer período de la lista tal "
-                 "cual la entrega Tourplan (el más reciente/último).",
-    "RATE TO": "ENTRADA (opcional, dd/mm/yyyy). Ver RATE FROM.",
-    "ESTADO": "SALIDA. PENDIENTE = a procesar. Volver a poner PENDIENTE para reprocesar esta fila.",
-    "OBSERVACIONES": "SALIDA. Detalle del resultado (cuántos períodos/códigos, o el error).",
-    "TIMESTAMP": "SALIDA. Momento en que se procesó esta fila.",
-}
+# Comentarios de ayuda en los headers del Excel original — decisión
+# explícita: no se portan a Sheets por ahora (la ayuda de cada columna
+# sigue en el README/skills del repo).
 
 
-def crear_excel_si_no_existe():
-    if os.path.exists(EXCEL_PATH):
-        return
-    wb = Workbook()
-    ws = wb.active
-    ws.title = HOJA_PRODUCTOS
-    headers = ["LOCATION", "SUPPLIER", "SERVICE TYPE", "CODIGO", "RATE FROM", "RATE TO",
-               "ESTADO", "OBSERVACIONES", "TIMESTAMP"]
-    ws.append(headers)
-    for i, h in enumerate(headers, start=1):
-        c = ws.cell(row=1, column=i)
-        c.font = Font(bold=True)
-        if h in _COMENTARIOS_PRODUCTOS:
-            c.comment = Comment(_COMENTARIOS_PRODUCTOS[h], "script")
-        ws.column_dimensions[get_column_letter(i)].width = max(14, len(h) + 2)
-    # Fila de ejemplo con ESTADO="EJEMPLO" (no "PENDIENTE") para que el
-    # script no se autoejecute sobre datos de mentira la primera vez.
-    ws.append(["BUE", "1MAD01", "HT", "", "", "", "EJEMPLO",
-               "Borrar esta fila y cargar las propias en PENDIENTE", ""])
-
-    ws2 = wb.create_sheet(HOJA_VIGENCIAS)
-    ws2.append(VIGENCIAS_HEADERS)
-    for i, h in enumerate(VIGENCIAS_HEADERS, start=1):
-        ws2.cell(row=1, column=i).font = Font(bold=True)
-        ws2.column_dimensions[get_column_letter(i)].width = max(14, len(h) + 2)
-
-    wb.save(EXCEL_PATH)
-    print(f"📄 Excel creado: {EXCEL_PATH} — completar la hoja {HOJA_PRODUCTOS!r} "
-          f"(borrar la fila EJEMPLO, ESTADO=PENDIENTE en las propias) y volver a correr.")
+def conectar_sheets_vigencias():
+    """Conecta las dos pestañas de este script (PRODUCTOS de entrada,
+    VIGENCIAS de salida) sobre el mismo Sheet. Ambas ya deben existir —
+    la persona convierte la plantilla completa (con las dos hojas) a
+    Google Sheets antes de correr."""
+    ws = conectar_sheets(SHEET_URL, HOJA_PRODUCTOS, CREDENTIALS_PATH, TOKEN_PATH)
+    ws_vigencias = conectar_sheets(SHEET_URL, HOJA_VIGENCIAS, CREDENTIALS_PATH, TOKEN_PATH)
+    return ws, ws_vigencias
 
 
-def cargar_pendientes():
-    wb = load_workbook(EXCEL_PATH)
-    ws = wb[HOJA_PRODUCTOS]
-    headers = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
-    col_idx = {h: i + 1 for i, h in enumerate(headers) if h}
-    rows = []
-    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        if not any(row):
-            continue
-        d = dict(zip(headers, row))
-        d["__row_idx__"] = row_idx
-        rows.append(d)
+def cargar_pendientes(ws):
+    rows, columnas = cargar_sheet(ws)
     pendientes = [r for r in rows
                   if str(r.get("ESTADO") or "").strip().upper() == "PENDIENTE"]
-    print(f"Excel cargado: {len(rows)} fila(s) en {HOJA_PRODUCTOS!r}, "
+    print(f"Sheet cargado: {len(rows)} fila(s) en {HOJA_PRODUCTOS!r}, "
           f"{len(pendientes)} PENDIENTE")
-    return wb, col_idx, pendientes
+    return columnas, pendientes
 
 
-def actualizar_fila_producto(wb, col_idx, row_idx, estado, observaciones):
-    ws = wb[HOJA_PRODUCTOS]
-    ws.cell(row=row_idx, column=col_idx["ESTADO"]).value = estado
-    if "OBSERVACIONES" in col_idx:
-        ws.cell(row=row_idx, column=col_idx["OBSERVACIONES"]).value = observaciones
-    if "TIMESTAMP" in col_idx:
-        ws.cell(row=row_idx, column=col_idx["TIMESTAMP"]).value = \
-            datetime.now().isoformat(timespec="seconds")
-    wb.save(EXCEL_PATH)
+def actualizar_fila_producto(ws, columnas, row_idx, estado, observaciones):
+    valores = {"ESTADO": estado}
+    if "OBSERVACIONES" in columnas:
+        valores["OBSERVACIONES"] = observaciones
+    if "TIMESTAMP" in columnas:
+        valores["TIMESTAMP"] = datetime.now().isoformat(timespec="seconds")
+    actualizar_fila_sheet(ws, row_idx, columnas, valores)
 
 
-def agregar_filas_vigencias(wb, filas):
-    """Append-only: agrega las filas ya leídas a la hoja RATES y guarda.
+def agregar_filas_vigencias(ws_vigencias, filas):
+    """Append-only: agrega las filas ya leídas a la hoja VIGENCIAS.
     No pisa nada de lo ya escrito por corridas/filas anteriores."""
-    if not filas:
-        return
-    ws = wb[HOJA_VIGENCIAS]
     for fila in filas:
-        ws.append([fila.get(h, "") for h in VIGENCIAS_HEADERS])
-    wb.save(EXCEL_PATH)
+        ws_vigencias.append_row([fila.get(h, "") for h in VIGENCIAS_HEADERS],
+                                 value_input_option="USER_ENTERED")
 
 
 # ── Lógica de negocio por fila de PRODUCTOS ─────────────────────────
@@ -1053,14 +1003,17 @@ def main():
     print("=" * 60)
     t_inicio = time.time()
 
-    crear_excel_si_no_existe()
-    wb, col_idx, pendientes = cargar_pendientes()
-    faltan = [c for c in ("LOCATION", "SUPPLIER", "ESTADO") if c not in col_idx]
+    if not SHEET_URL:
+        raise ValueError("No se indicó la URL del Google Sheet (TOURPLAN_SHEET_URL).")
+
+    ws, ws_vigencias = conectar_sheets_vigencias()
+    columnas, pendientes = cargar_pendientes(ws)
+    faltan = [c for c in ("LOCATION", "SUPPLIER", "ESTADO") if c not in columnas]
     if faltan:
         raise ValueError(f"Faltan columnas obligatorias en {HOJA_PRODUCTOS!r}: {faltan}")
 
     if not pendientes:
-        print(f"\n⛔ Sin filas PENDIENTE en {EXCEL_PATH!r} (hoja {HOJA_PRODUCTOS!r}). "
+        print(f"\n⛔ Sin filas PENDIENTE en el Sheet (hoja {HOJA_PRODUCTOS!r}). "
               f"Completar y poner ESTADO=PENDIENTE.")
         return
     if LIMIT_PRUEBA:
@@ -1097,8 +1050,8 @@ def main():
             # Guardar INMEDIATAMENTE (filas RATES + estado de la fila
             # PRODUCTOS) — así una corrida cortada a mitad de camino deja
             # registro de lo ya procesado.
-            agregar_filas_vigencias(wb, filas_vigencias)
-            actualizar_fila_producto(wb, col_idx, row_idx, estado, observaciones)
+            agregar_filas_vigencias(ws_vigencias, filas_vigencias)
+            actualizar_fila_producto(ws, columnas, row_idx, estado, observaciones)
 
     except AbortadoPorUsuario:
         _abortado = True
@@ -1110,7 +1063,7 @@ def main():
         dur = int(time.time() - t_inicio)
         m, s = divmod(dur, 60)
         print(f"\n🏁 Fin. Duración: {m}m {s:02d}s")
-        print(f"📄 Excel: {EXCEL_PATH}")
+        print(f"📄 Sheet: {SHEET_URL}")
 
     if _abortado:
         sys.exit(ABORT_EXIT_CODE)
