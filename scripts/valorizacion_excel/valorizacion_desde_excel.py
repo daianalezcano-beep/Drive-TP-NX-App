@@ -50,7 +50,7 @@
 #                  igual al Location pedido; si ninguna coincide, no
 #                  clickea nada.
 #
-# Excel — hoja "TARIFAS" (ver _HEADERS más abajo):
+# Sheet — pestaña "TARIFAS":
 #   LOCATION, SUPPLIER, SERVICE TYPE, SERVICE CODE, RATE FROM,
 #   RATE TO, PRICE CODE, VALOR, MOSTRAR CAPTURAS, ESTADO,
 #   OBSERVACIONES, TIMESTAMP.
@@ -62,12 +62,20 @@ VERSION_FECHA = "2026-09-01"
 # ── Config — via variables de entorno (con default = valor original) ──
 import os
 
-USERNAME   = os.environ.get("TOURPLAN_USERNAME", "poner minusculas")
-PASSWORD   = os.environ.get("TOURPLAN_PASSWORD", "password")
-BASE_URL   = os.environ.get("TOURPLAN_BASE_URL", "https://tourplannx.eurotur.com.ar/TourplanNX_Test")
-EXCEL_PATH = os.environ.get("TOURPLAN_EXCEL_PATH", "/content/cargar_tarifa_periodo.xlsx")
-SHEET      = os.environ.get("TOURPLAN_HOJA", "TARIFAS")
-SS_DIR     = os.environ.get("TOURPLAN_SS_DIR", "/content/screenshots")
+from common.user_config import (
+    CREDENTIALS_PATH as _CREDENTIALS_PATH_DEFAULT,
+    TOKEN_PATH as _TOKEN_PATH_DEFAULT,
+)
+
+USERNAME         = os.environ.get("TOURPLAN_USERNAME", "poner minusculas")
+PASSWORD         = os.environ.get("TOURPLAN_PASSWORD", "password")
+BASE_URL         = os.environ.get("TOURPLAN_BASE_URL", "https://tourplannx.eurotur.com.ar/TourplanNX_Test")
+SHEET_URL        = os.environ.get("TOURPLAN_SHEET_URL", "")
+SHEET            = os.environ.get("TOURPLAN_HOJA", "TARIFAS")
+CREDENTIALS_PATH = os.environ.get("TOURPLAN_CREDENTIALS_PATH", _CREDENTIALS_PATH_DEFAULT)
+TOKEN_PATH       = os.environ.get("TOURPLAN_TOKEN_PATH", _TOKEN_PATH_DEFAULT)
+SS_DIR           = os.environ.get("TOURPLAN_SS_DIR", "/content/screenshots")
+HEADLESS         = os.environ.get("TOURPLAN_HEADLESS", "0").strip() in ("1", "true", "True")
 os.makedirs(SS_DIR, exist_ok=True)
 
 # ── Modo de ejecución ─────────────────────────────────────────
@@ -133,10 +141,11 @@ print("🔧 Verificando entorno...\n")
 
 # 0.1 Paquetes Python
 _PIPS_NEEDED = {
-    "selenium":          "selenium",
-    "openpyxl":          "openpyxl",
-    "webdriver_manager": "webdriver-manager",
-    "IPython":           "ipython",
+    "selenium":            "selenium",
+    "webdriver_manager":   "webdriver-manager",
+    "IPython":             "ipython",
+    "gspread":             "gspread",
+    "google_auth_oauthlib": "google-auth-oauthlib",
 }
 _pips_faltantes = [
     pkg for mod, pkg in _PIPS_NEEDED.items()
@@ -156,6 +165,8 @@ else:
 from common.chrome_bootstrap import find_or_prepare_chrome
 # 0.2b Botón Abortar de la app (ver common/abort.py)
 from common.abort import chequear_abort, AbortadoPorUsuario, ABORT_EXIT_CODE
+# 0.2c Google Sheets como cola de trabajo (ver common/sheets_client.py)
+from common.sheets_client import conectar_sheets, cargar_sheet, actualizar_fila_sheet
 
 CHROMIUM_BIN, ver_chrome = find_or_prepare_chrome()
 
@@ -170,8 +181,6 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.keys import Keys
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment
 
 # ── Helpers base ──────────────────────────────────────────────
 def ss(driver, nombre):
@@ -214,9 +223,11 @@ def crear_driver():
     import tempfile
 
     opts = Options()
-    # Sin --headless: esto corre en la PC de la persona (con pantalla), no en
-    # el contenedor sin pantalla de Colab. Ademas, varias empresas bloquean
-    # el modo headless de Chrome por politica de seguridad.
+    # Sin ventana visible solo si se pide explícitamente (TOURPLAN_HEADLESS,
+    # checkbox en Configuración) — por default corre con ventana real en la
+    # PC de la persona, a diferencia del contenedor sin pantalla de Colab.
+    if HEADLESS:
+        opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1366,911")
@@ -1383,76 +1394,25 @@ def cargar_tarifa_option(driver, service_code, supplier, location, service_type,
             "etiqueta_fila": etiqueta_fila, "pc_warning": pc_warning}
 
 
-# ── Excel: cola de trabajo (ver skill armando-excel-como-cola-de-trabajo) ──
-_HEADERS = ["LOCATION", "SUPPLIER", "SERVICE TYPE", "SERVICE CODE",
-            "RATE FROM", "RATE TO", "PRICE CODE", "VALOR",
-            "MOSTRAR CAPTURAS", "ESTADO", "OBSERVACIONES", "TIMESTAMP"]
-
-def crear_excel_si_no_existe():
-    if os.path.exists(EXCEL_PATH):
-        return False
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = SHEET
-
-    fill_h = PatternFill("solid", start_color="1F4E79", fgColor="1F4E79")
-    font_h = Font(name="Arial", bold=True, color="FFFFFF", size=9)
-    aln_c  = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    for col, h in enumerate(_HEADERS, 1):
-        c = ws.cell(row=1, column=col, value=h)
-        c.font = font_h; c.fill = fill_h; c.alignment = aln_c
-
-    ws.cell(row=2, column=C["location"],         value="BUE")
-    ws.cell(row=2, column=C["supplier"],         value="1EURO1")
-    ws.cell(row=2, column=C["service_type"],     value="EX")
-    ws.cell(row=2, column=C["service_code"],     value="CSUS01")
-    ws.cell(row=2, column=C["rate_from"],        value="01/Sep/2026")
-    ws.cell(row=2, column=C["rate_to"],          value="31/Dec/2026")
-    ws.cell(row=2, column=C["price_code"],       value="TR")
-    ws.cell(row=2, column=C["valor"],            value=100.0)
-    ws.cell(row=2, column=C["mostrar_capturas"], value="NO")
-    ws.cell(row=2, column=C["estado"],           value="EJEMPLO")
-
-    for col_letter, w in (("A",10),("B",10),("C",13),("D",14),("E",13),
-                          ("F",13),("G",11),("H",12),("I",16),("J",14),
-                          ("K",40),("L",18)):
-        ws.column_dimensions[col_letter].width = w
-
-    wb.save(EXCEL_PATH)
-    print(f"✅ Excel creado: {EXCEL_PATH}")
-    return True
+# ── Sheet: cola de trabajo (ver skill armando-excel-como-cola-de-trabajo) ──
+_ws = None
+_columnas = None
 
 def leer_pendientes():
-    wb = openpyxl.load_workbook(EXCEL_PATH)
-    ws = wb[SHEET]
-    headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
-    col_idx = {h: i + 1 for i, h in enumerate(headers) if h}
-    rows = []
-    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        if not any(row):
-            continue
-        d = dict(zip(headers, row))
-        if str(d.get("ESTADO") or "").strip().upper() != "PENDIENTE":
-            continue
-        d["__row_idx__"] = row_idx
-        rows.append(d)
-    wb.close()
-    return rows
+    global _ws, _columnas
+    _ws = conectar_sheets(SHEET_URL, SHEET, CREDENTIALS_PATH, TOKEN_PATH)
+    rows, _columnas = cargar_sheet(_ws)
+    return [r for r in rows if str(r.get("ESTADO") or "").strip().upper() == "PENDIENTE"]
 
 def marcar_procesando(row_idx):
-    wb = openpyxl.load_workbook(EXCEL_PATH)
-    ws = wb[SHEET]
-    ws.cell(row=row_idx, column=C["estado"], value="PROCESANDO")
-    wb.save(EXCEL_PATH); wb.close()
+    actualizar_fila_sheet(_ws, row_idx, _columnas, {"ESTADO": "PROCESANDO"})
 
 def escribir_resultado(row_idx, estado, observaciones=""):
-    wb = openpyxl.load_workbook(EXCEL_PATH)
-    ws = wb[SHEET]
-    ws.cell(row=row_idx, column=C["estado"], value=estado)
-    ws.cell(row=row_idx, column=C["observaciones"], value=observaciones[:500] if observaciones else "")
-    ws.cell(row=row_idx, column=C["timestamp"], value=datetime.now().strftime("%Y-%m-%d %H:%M"))
-    wb.save(EXCEL_PATH); wb.close()
+    actualizar_fila_sheet(_ws, row_idx, _columnas, {
+        "ESTADO": estado,
+        "OBSERVACIONES": observaciones[:500] if observaciones else "",
+        "TIMESTAMP": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    })
 
 
 # ── MAIN ──────────────────────────────────────────────────────
@@ -1463,7 +1423,8 @@ def main():
     print("=" * 60)
 
     t_inicio = time.time()
-    crear_excel_si_no_existe()
+    if not SHEET_URL:
+        raise ValueError("No se indicó la URL del Google Sheet (TOURPLAN_SHEET_URL).")
     pendientes = leer_pendientes()
     print(f"Filas PENDIENTE: {len(pendientes)}")
     if not pendientes:
@@ -1530,12 +1491,7 @@ def main():
         dur = int(time.time() - t_inicio)
         m, s = divmod(dur, 60)
         print(f"\n🏁 Fin. Duración: {m}m {s:02d}s")
-        print(f"📄 Excel: {EXCEL_PATH}")
-        try:
-            from google.colab import files
-            files.download(EXCEL_PATH)
-        except Exception:
-            pass
+        print(f"📄 Sheet: {SHEET_URL}")
 
     if _abortado:
         sys.exit(ABORT_EXIT_CODE)
