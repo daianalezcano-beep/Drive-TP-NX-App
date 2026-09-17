@@ -151,7 +151,6 @@ print("🔧 Verificando entorno...\n")
 _PIPS_NEEDED = {
     "selenium":            "selenium",
     "webdriver_manager":   "webdriver-manager",
-    "IPython":             "ipython",
     "gspread":             "gspread",
     "google_auth_oauthlib": "google-auth-oauthlib",
 }
@@ -184,7 +183,6 @@ CHROMIUM_BIN, ver_chrome = find_or_prepare_chrome()
 
 from webdriver_manager.chrome import ChromeDriverManager
 
-from IPython.display import display, Image as IPyImage
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -251,7 +249,6 @@ C = {
     "rate_from":        4,   # D - inicio período dd/Mon/yyyy
     "rate_to":          5,   # E - fin período dd/Mon/yyyy
     "price_code":       6,   # F - TR, 34, etc. Vacío/ALL = Unassigned
-    "mostrar_capturas": 7,   # G - SI/NO
     "service_code":     8,   # H - opcional: si se especifica, procesa solo ese servicio madre
     "servicios_pkg":    9,   # I - SALIDA: códigos Package procesados
     "servicios_skip":  10,   # J - SALIDA: códigos saltados
@@ -267,7 +264,6 @@ C = {
 }
 
 RATES_START     = 13   # columnas de rates dinámicos empiezan en M
-MOSTRAR_CAPTURAS = False
 
 _ss_n = [0]
 
@@ -277,8 +273,6 @@ def ss(driver, nombre):
     p = f"{SS_DIR}/{_ss_n[0]:03d}_{nombre[:40]}_{int(time.time())}.png"
     driver.save_screenshot(p)
     print(f"  📸 {os.path.basename(p)}")
-    if MOSTRAR_CAPTURAS:
-        display(IPyImage(p, width=900))
 
 def dump(driver, nombre):
     p = f"{SS_DIR}/{nombre}_{int(time.time())}.html"
@@ -3234,8 +3228,6 @@ HEADER_ALIASES = {
     "TO":               "rate_to",
     "PRICE CODE":       "price_code",
     "PRICECODE":        "price_code",
-    "MOSTRAR CAPTURAS": "mostrar_capturas",
-    "CAPTURAS":         "mostrar_capturas",
     "SERVICE CODE":     "service_code",
     "SERVICECODE":      "service_code",
     "PRODUCT CODE":     "service_code",
@@ -3264,21 +3256,6 @@ def _mapear_columnas(columnas):
         if campo not in mapa and 0 <= pos - 1 < len(columnas):
             mapa[campo] = columnas[pos - 1]
     return mapa
-
-
-def leer_flag_mostrar_capturas():
-    try:
-        filas, columnas = cargar_sheet(_ws)
-        col = _mapear_columnas(columnas).get("mostrar_capturas")
-        if not col:
-            return False
-        for fila in filas:
-            val = str(fila.get(col) or "").strip().upper()
-            if val:
-                return val in ("SI", "SÍ", "S", "YES", "Y", "TRUE", "1")
-        return False
-    except Exception:
-        return False
 
 
 def leer_pendientes():
@@ -3676,9 +3653,6 @@ if not SHEET_URL:
 
 conectar_sheets_madre()
 print(f"📄 Sheet: {SHEET_URL}")
-
-MOSTRAR_CAPTURAS = leer_flag_mostrar_capturas()
-print(f"🖼  Mostrar capturas inline: {'SÍ' if MOSTRAR_CAPTURAS else 'NO'}")
 
 pendientes_f1 = leer_pendientes()              if MODO in ("LEER",    "COMPLETO") else []
 pendientes_f2 = leer_pcm_detail_pendientes_fase2() if MODO in ("APLICAR", "COMPLETO") else []

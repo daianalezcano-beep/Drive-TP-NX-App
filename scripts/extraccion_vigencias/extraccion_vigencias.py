@@ -129,9 +129,7 @@ LIMIT_CODIGOS_PRUEBA = 0
 
 VELOCIDAD = 1.0  # multiplicador de todos los time.sleep — subir si la red es lenta
 
-MOSTRAR_CAPTURAS = False
 _ss_n = [0]
-_avisado_sin_ipython = [False]
 
 
 # ── Helpers base (REUTILIZADO tal cual de los scripts hermanos) ────
@@ -141,15 +139,6 @@ def ss(driver, nombre):
     p = f"{SS_DIR}/{_ss_n[0]:03d}_{nombre[:40]}_{int(time.time())}.png"
     driver.save_screenshot(p)
     print(f"  📸 {os.path.basename(p)}")
-    if MOSTRAR_CAPTURAS:
-        try:
-            from IPython.display import display, Image as IPyImage
-            display(IPyImage(p, width=900))
-        except ImportError:
-            if not _avisado_sin_ipython[0]:
-                print("    ⚠ MOSTRAR_CAPTURAS=True pero no hay IPython disponible "
-                      "(sólo se ve inline en Colab/Jupyter) — se sigue guardando en disco.")
-                _avisado_sin_ipython[0] = True
 
 
 def dump(driver, nombre):

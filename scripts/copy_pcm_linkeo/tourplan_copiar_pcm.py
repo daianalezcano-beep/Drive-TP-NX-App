@@ -44,7 +44,6 @@ print("🔧 Verificando entorno...\n")
 _PIPS_NEEDED = {
     "selenium":            "selenium",
     "webdriver_manager":   "webdriver-manager",
-    "IPython":             "ipython",
     "gspread":             "gspread",
     "google_auth_oauthlib": "google-auth-oauthlib",
 }
@@ -73,7 +72,6 @@ CHROMIUM_BIN, ver_chrome = find_or_prepare_chrome()
 
 from webdriver_manager.chrome import ChromeDriverManager
 
-from IPython.display import display, Image as IPyImage
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -123,7 +121,6 @@ C = {
     "service_code":     4,   # D - obligatorio: código del servicio madre a abrir
     "codigo_nuevo":     5,   # E - obligatorio: reemplaza la 5ta posición (post 4to guion)
                               #     del nombre del PCM original
-    "mostrar_capturas": 6,   # F - SI/NO
     "estado":           7,   # G - PENDIENTE para procesar
     "pcm_original":     8,   # H - SALIDA: nombre del PCM original encontrado
     "pcm_copiado":      9,   # I - SALIDA: nombre final asignado a la copia
@@ -131,7 +128,6 @@ C = {
     "timestamp":       11,   # K - SALIDA: timestamp
 }
 
-MOSTRAR_CAPTURAS = False
 _ss_n = [0]
 
 # ── Helpers base ──────────────────────────────────────────────
@@ -140,8 +136,6 @@ def ss(driver, nombre):
     p = f"{SS_DIR}/{_ss_n[0]:03d}_{nombre[:40]}_{int(time.time())}.png"
     driver.save_screenshot(p)
     print(f"  📸 {os.path.basename(p)}")
-    if MOSTRAR_CAPTURAS:
-        display(IPyImage(p, width=900))
 
 def dump(driver, nombre):
     p = f"{SS_DIR}/{nombre}_{int(time.time())}.html"
@@ -1264,7 +1258,6 @@ HEADER_ALIASES = {
     "SERVICE CODE":     "service_code",
     "CODIGO NUEVO":     "codigo_nuevo",
     "CÓDIGO NUEVO":     "codigo_nuevo",
-    "MOSTRAR CAPTURAS": "mostrar_capturas",
     "ESTADO":           "estado",
     "PCM ORIGINAL":     "pcm_original",
     "PCM COPIADO":      "pcm_copiado",
@@ -1295,20 +1288,6 @@ def conectar_sheet():
     global _ws
     _ws = conectar_sheets(SHEET_URL, SHEET, CREDENTIALS_PATH, TOKEN_PATH)
     return _ws
-
-def leer_flag_mostrar_capturas():
-    try:
-        filas, columnas = cargar_sheet(_ws)
-        col = _mapear_columnas(columnas).get("mostrar_capturas")
-        if not col:
-            return False
-        for fila in filas:
-            val = str(fila.get(col) or "").strip().upper()
-            if val:
-                return val in ("SI", "SÍ", "S", "YES", "Y", "TRUE", "1")
-        return False
-    except Exception:
-        return False
 
 def leer_pendientes():
     global _columnas, _campo_a_columna
@@ -1436,9 +1415,6 @@ if not SHEET_URL:
 
 conectar_sheet()
 print(f"📄 Sheet: {SHEET_URL}")
-
-MOSTRAR_CAPTURAS = leer_flag_mostrar_capturas()
-print(f"🖼  Mostrar capturas inline: {'SÍ' if MOSTRAR_CAPTURAS else 'NO'}")
 
 pendientes = leer_pendientes()
 print(f"📊 Filas PENDIENTE: {len(pendientes)}")

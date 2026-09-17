@@ -117,7 +117,6 @@ print("🔧 Verificando entorno...\n")
 _PIPS_NEEDED = {
     "selenium":            "selenium",
     "webdriver_manager":   "webdriver-manager",
-    "IPython":             "ipython",
     "gspread":             "gspread",
     "google_auth_oauthlib": "google-auth-oauthlib",
 }
@@ -153,7 +152,6 @@ CHROMIUM_BIN, ver_chrome = find_or_prepare_chrome()
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ── 0.4  Imports del resto del script ───────────────────────
-from IPython.display import display, Image as IPyImage
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -209,7 +207,6 @@ C = {
     "rate_from":         5,   # E
     "rate_to":           6,   # F
     "price_code":        7,   # G  ← price code a usar (TR, 34, ... o ALL)
-    "mostrar_capturas":  8,   # H  ← mostrar capturas inline (SI/NO, default NO)
     "cod_destino":       9,   # I  override servicio madre
     "rate_from_d":      10,   # J
     "rate_to_d":        11,   # K
@@ -224,20 +221,12 @@ RATES_START = 17
 
 _ss_n = [0]
 
-# Mostrar las capturas inline en Colab. Se lee de la columna MOSTRAR CAPTURAS
-# del Excel (default NO). Aunque sea NO, las capturas SÍ se guardan en disco
-# (para depurar errores); sólo se evita renderizarlas en el notebook, que es
-# lo que hace lento el output con ~370 imágenes.
-MOSTRAR_CAPTURAS = False
-
 # ── Helpers base ──────────────────────────────────────────────
 def ss(driver, nombre):
     _ss_n[0] += 1
     p = f"{SS_DIR}/{_ss_n[0]:03d}_{nombre[:40]}_{int(time.time())}.png"
     driver.save_screenshot(p)
     print(f"  📸 {os.path.basename(p)}")
-    if MOSTRAR_CAPTURAS:
-        display(IPyImage(p, width=900))
 
 def dump(driver, nombre):
     p = f"{SS_DIR}/{nombre}_{int(time.time())}.html"
@@ -3338,8 +3327,6 @@ HEADER_ALIASES = {
     "RATE FROM": "rate_from", "FROM": "rate_from", "DESDE": "rate_from",
     "RATE TO": "rate_to", "TO": "rate_to", "HASTA": "rate_to",
     "PRICE CODE": "price_code", "PRICECODE": "price_code", "PC": "price_code",
-    "MOSTRAR CAPTURAS": "mostrar_capturas", "CAPTURAS": "mostrar_capturas",
-    "MOSTRAR SCREENSHOTS": "mostrar_capturas", "SCREENSHOTS": "mostrar_capturas",
     "COD DESTINO": "cod_destino", "DESTINO": "cod_destino",
     "RATE FROM D": "rate_from_d", "RATE TO D": "rate_to_d",
     "PCM REF": "pcm_ref", "DÍAS OP": "dias_op", "DIAS OP": "dias_op",
@@ -3360,23 +3347,6 @@ def _mapear_columnas(columnas):
         if campo not in mapa and 0 <= pos - 1 < len(columnas):
             mapa[campo] = columnas[pos - 1]
     return mapa
-
-
-def leer_flag_mostrar_capturas():
-    """Lee la columna MOSTRAR CAPTURAS de la hoja de entrada (primer valor no
-    vacío). Devuelve True sólo si dice SI/SÍ/YES/TRUE/1. Default False."""
-    try:
-        filas, columnas = cargar_sheet(_ws)
-        col = _mapear_columnas(columnas).get("mostrar_capturas")
-        if not col:
-            return False
-        for fila in filas:
-            val = str(fila.get(col) or "").strip().upper()
-            if val:
-                return val in ("SI", "SÍ", "S", "YES", "Y", "TRUE", "1")
-        return False
-    except Exception:
-        return False
 
 
 def leer_pendientes():
@@ -3738,11 +3708,6 @@ if not SHEET_URL:
 
 conectar_sheets_pkg()
 print(f"📄 Sheet: {SHEET_URL}")
-
-# Flag global: mostrar capturas inline (default NO → corre más rápido)
-MOSTRAR_CAPTURAS = leer_flag_mostrar_capturas()
-print(f"🖼  Mostrar capturas inline: {'SÍ' if MOSTRAR_CAPTURAS else 'NO'} "
-      f"(columna MOSTRAR CAPTURAS)")
 
 # ── Recolectar trabajo de cada fase ───────────────────────────
 pendientes_f1  = leer_pendientes()          if MODO in ("LEER",    "COMPLETO") else []

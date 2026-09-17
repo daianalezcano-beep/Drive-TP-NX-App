@@ -52,7 +52,7 @@
 #
 # Sheet — pestaña "TARIFAS":
 #   LOCATION, SUPPLIER, SERVICE TYPE, SERVICE CODE, RATE FROM,
-#   RATE TO, PRICE CODE, VALOR, MOSTRAR CAPTURAS, ESTADO,
+#   RATE TO, PRICE CODE, VALOR, ESTADO,
 #   OBSERVACIONES, TIMESTAMP.
 # ============================================================
 
@@ -122,13 +122,11 @@ C = {
     "rate_to":          6,   # F - fin período dd/Mon/yyyy
     "price_code":       7,   # G - TR, 34, etc. o ALL. Default: TR
     "valor":            8,   # H - valor único a cargar en Group Cost/Sell y FIT Cost/Sell
-    "mostrar_capturas": 9,   # I - SI/NO
     "estado":          10,   # J - PENDIENTE para procesar
     "observaciones":   11,   # K - SALIDA: detalle del resultado
     "timestamp":       12,   # L - SALIDA: fecha/hora de procesamiento
 }
 
-MOSTRAR_CAPTURAS = False
 _ss_n = [0]
 
 # ── PASO 0: Entorno ──────────────────────────────────────────
@@ -143,7 +141,6 @@ print("🔧 Verificando entorno...\n")
 _PIPS_NEEDED = {
     "selenium":            "selenium",
     "webdriver_manager":   "webdriver-manager",
-    "IPython":             "ipython",
     "gspread":             "gspread",
     "google_auth_oauthlib": "google-auth-oauthlib",
 }
@@ -173,7 +170,6 @@ CHROMIUM_BIN, ver_chrome = find_or_prepare_chrome()
 # 0.3 Imports
 from webdriver_manager.chrome import ChromeDriverManager
 
-from IPython.display import display, Image as IPyImage
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -188,8 +184,6 @@ def ss(driver, nombre):
     p = f"{SS_DIR}/{_ss_n[0]:03d}_{nombre[:40]}_{int(time.time())}.png"
     driver.save_screenshot(p)
     print(f"  📸 {os.path.basename(p)}")
-    if MOSTRAR_CAPTURAS:
-        display(IPyImage(p, width=900))
 
 def dump(driver, nombre):
     p = f"{SS_DIR}/{nombre}_{int(time.time())}.html"
@@ -1417,7 +1411,6 @@ def escribir_resultado(row_idx, estado, observaciones=""):
 
 # ── MAIN ──────────────────────────────────────────────────────
 def main():
-    global MOSTRAR_CAPTURAS
     print("=" * 60)
     print(f"  CARGA DE TARIFA POR PERÍODO  v{VERSION} ({VERSION_FECHA})  MODO={MODO}")
     print("=" * 60)
@@ -1442,7 +1435,6 @@ def main():
             print(f"\n{'─' * 60}")
             print(f"Fila {row_idx}: {fila.get('SERVICE CODE')}")
 
-            MOSTRAR_CAPTURAS = str(fila.get("MOSTRAR CAPTURAS") or "").strip().upper() == "SI"
             marcar_procesando(row_idx)
 
             try:
