@@ -139,7 +139,7 @@ from common.chrome_bootstrap import find_or_prepare_chrome
 # ── 0.2b  Botón Abortar de la app (ver common/abort.py) ──────
 from common.abort import chequear_abort, AbortadoPorUsuario, ABORT_EXIT_CODE
 # ── 0.2c  Google Sheets como cola de trabajo (ver common/sheets_client.py) ──
-from common.sheets_client import conectar_sheets, cargar_sheet, actualizar_fila_sheet, asegurar_columnas
+from common.sheets_client import conectar_sheets, cargar_sheet, actualizar_fila_sheet, asegurar_columnas, agregar_fila_sheet
 from common.user_config import (
     CREDENTIALS_PATH as _CREDENTIALS_PATH_DEFAULT,
     TOKEN_PATH as _TOKEN_PATH_DEFAULT,
@@ -3221,25 +3221,43 @@ def escribir_pcm_detail_fase1(cod_origen, location, supplier, rate_from, rate_to
     """
     Fase 1: agrega una fila en PCM_Detail con los datos leídos del PCM.
     ESTADO_FASE2 = PENDIENTE_APLICAR (si lectura OK) o SKIP (si error).
-    Usa append_row directo sobre el worksheet (_ws_detail) — Angular/Sheets
-    ya deja la fila siguiente libre, sin necesitar calcular next_row.
+    Escribe por nombre de columna (no por posición fija), para no
+    depender de que el Sheet tenga las columnas en el orden exacto de
+    _DETAIL_HEADERS/_MARKUP_PAX.
     """
+    global _columnas_detail
     estado_f2 = "PENDIENTE_APLICAR" if estado_fase1 == "LEIDO" else "SKIP"
     markup_str = json.dumps(markup_dict, ensure_ascii=False) if markup_dict else ""
 
-    vals = [
-        datetime.now().strftime("%Y-%m-%d %H:%M"),
-        cod_origen, location, supplier, rate_from, rate_to,
-        nombre_pcm, supplier_pcm, cod_destino, dias_op,
-        fecha_ant, fecha_nueva, markup_str, price_code,
-        estado_fase1, error_fase1[:300] if error_fase1 else "",
-        estado_f2, "",
-    ]
-    # Markup abierto: un valor por columna de rango pax (1+0 … 41+0), en el
-    # mismo orden de columnas que ya trae la plantilla.
-    vals += [markup_dict.get(rango, "") if markup_dict else "" for rango in _MARKUP_PAX]
+    valores = {
+        "TIMESTAMP":     datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "COD ORIGEN":    cod_origen,
+        "LOCATION":      location,
+        "SUPPLIER":      supplier,
+        "RATE FROM":     rate_from,
+        "RATE TO":       rate_to,
+        "PCM":           nombre_pcm,
+        "SUPPLIER PCM":  supplier_pcm,
+        "COD DESTINO":   cod_destino,
+        "DIAS OP":       dias_op,
+        "FECHA ANT":     fecha_ant,
+        "FECHA NUEVA":   fecha_nueva,
+        "MARKUP JSON":   markup_str,
+        "PRICE CODE":    price_code,
+        "ESTADO F1":     estado_fase1,
+        "ERROR F1":      error_fase1[:300] if error_fase1 else "",
+        "ESTADO F2":     estado_f2,
+        "ERROR F2":      "",
+    }
+    # Markup abierto: un valor por columna de rango pax (1+0 … 41+0).
+    valores.update({
+        rango: (markup_dict.get(rango, "") if markup_dict else "")
+        for rango in _MARKUP_PAX
+    })
 
-    _ws_detail.append_row(vals, value_input_option="USER_ENTERED")
+    asegurar_columnas(_ws_detail, _DETAIL_HEADERS + _MARKUP_PAX)
+    _columnas_detail = _ws_detail.row_values(1)
+    agregar_fila_sheet(_ws_detail, _columnas_detail, valores)
     print(f"    📝 PCM_Detail F1: {nombre_pcm} → {estado_fase1}/{estado_f2}")
 
 

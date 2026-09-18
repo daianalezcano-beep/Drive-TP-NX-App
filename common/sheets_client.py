@@ -110,3 +110,22 @@ def actualizar_fila_sheet(ws, row_idx, columnas, valores):
         updates.append({"range": rowcol_to_a1(row_idx, col_idx), "values": [[valor]]})
     if updates:
         ws.batch_update(updates)
+
+
+def agregar_fila_sheet(ws, columnas, valores):
+    """Agrega una fila nueva al final, por nombre de columna (no por
+    posición fija) — a diferencia de ws.append_row(), no depende de que
+    el Sheet tenga las columnas en un orden exacto, y evita el caso
+    confirmado en que gspread ubica la fila nueva lejos de donde
+    corresponde si hay alguna celda suelta más a la derecha de la tabla
+    (rompe la detección de rango que usa append_row). Columnas que no
+    existen en el Sheet se ignoran en silencio (mismo comportamiento
+    que actualizar_fila_sheet).
+
+    columnas: encabezados actuales del Sheet (ej. ws.row_values(1)).
+    valores: dict {nombre_de_columna: valor}.
+    Devuelve el row_idx de la fila escrita.
+    """
+    row_idx = len(ws.get_all_values()) + 1
+    actualizar_fila_sheet(ws, row_idx, columnas, valores)
+    return row_idx

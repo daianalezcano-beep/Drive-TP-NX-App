@@ -86,7 +86,7 @@ if _pips_faltantes:
 # tenía sentido en el contenedor Linux de Colab.
 from common.chrome_bootstrap import find_or_prepare_chrome
 from common.abort import chequear_abort, AbortadoPorUsuario, ABORT_EXIT_CODE
-from common.sheets_client import conectar_sheets, cargar_sheet, actualizar_fila_sheet
+from common.sheets_client import conectar_sheets, cargar_sheet, actualizar_fila_sheet, asegurar_columnas
 from common.user_config import (
     CREDENTIALS_PATH as _CREDENTIALS_PATH_DEFAULT,
     TOKEN_PATH as _TOKEN_PATH_DEFAULT,
@@ -890,11 +890,17 @@ def actualizar_fila_producto(ws, columnas, row_idx, estado, observaciones):
 
 
 def agregar_filas_vigencias(ws_vigencias, filas):
-    """Append-only: agrega las filas ya leídas a la hoja VIGENCIAS.
-    No pisa nada de lo ya escrito por corridas/filas anteriores."""
+    """Append-only: agrega las filas ya leídas a la hoja VIGENCIAS, por
+    nombre de columna real del Sheet (no por posición fija de
+    VIGENCIAS_HEADERS) — no pisa nada de lo ya escrito por
+    corridas/filas anteriores."""
+    asegurar_columnas(ws_vigencias, VIGENCIAS_HEADERS)
+    columnas = ws_vigencias.row_values(1)
+    row_idx = len(ws_vigencias.get_all_values()) + 1
     for fila in filas:
-        ws_vigencias.append_row([fila.get(h, "") for h in VIGENCIAS_HEADERS],
-                                 value_input_option="USER_ENTERED")
+        valores = {h: fila.get(h, "") for h in VIGENCIAS_HEADERS}
+        actualizar_fila_sheet(ws_vigencias, row_idx, columnas, valores)
+        row_idx += 1
 
 
 # ── Lógica de negocio por fila de PRODUCTOS ─────────────────────────
