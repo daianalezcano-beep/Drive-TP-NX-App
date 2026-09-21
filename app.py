@@ -210,6 +210,65 @@ def _refrescar_conteo(state, sheet_url, hoja):
         return False
 
 
+def _chequear_pendientes_globales():
+    """Chequeo único al abrir la app (no se repite en cada rerun de
+    Streamlit — ver render_aviso_pendientes): para cada script con una URL
+    de Sheet guardada en Configuración, cuenta filas Pendiente/En proceso.
+    Un error puntual leyendo un Sheet no bloquea el chequeo de los demás."""
+    pendientes = []
+    for key, cfg in SCRIPTS.items():
+        if not cfg["script_path"].exists():
+            continue
+        sheet_url = user_config.sheet_url_default(key)
+        if not sheet_url:
+            continue
+        try:
+            ws = conectar_sheets(
+                sheet_url, cfg["sheet"], user_config.CREDENTIALS_PATH, user_config.TOKEN_PATH)
+            filas, _ = cargar_sheet(ws)
+        except Exception:
+            continue
+        conteo = _contar_estados(filas)
+        if conteo["Pendiente"] or conteo["En proceso"]:
+            pendientes.append({
+                "key": key,
+                "label": cfg["label"],
+                "pendiente": conteo["Pendiente"],
+                "procesando": conteo["En proceso"],
+            })
+    return pendientes
+
+
+def render_aviso_pendientes():
+    """Aviso arriba de todo si quedaron filas sin procesar de una corrida
+    anterior (abortada o cortada). El chequeo es una sola vez por sesión de
+    navegador (al abrir la app) — no depende del botón Refrescar de cada
+    script, que es para ver el progreso de una corrida activa."""
+    if "_pendientes_globales" not in st.session_state:
+        st.session_state["_pendientes_globales"] = _chequear_pendientes_globales()
+
+    pendientes = st.session_state["_pendientes_globales"]
+    if not pendientes:
+        return
+
+    st.warning("⚠️ Tenés corridas sin terminar:")
+    for item in pendientes:
+        col_txt, col_btn = st.columns([4, 1])
+        with col_txt:
+            partes = []
+            if item["pendiente"]:
+                partes.append(f"{item['pendiente']} PENDIENTE")
+            if item["procesando"]:
+                partes.append(f"{item['procesando']} en PROCESANDO (quedó a medias)")
+            st.markdown(f"**{item['label']}** — {', '.join(partes)}")
+        with col_btn:
+            if st.button("▶ Ir a este script", key=f"ir_a_{item['key']}", use_container_width=True):
+                st.session_state["selected_script"] = item["key"]
+                st.session_state["vista"] = "script"
+                st.rerun()
+    st.divider()
+
+
 def _leer_proceso(proc, state):
     """Corre en un hilo aparte: lee el stdout del subproceso sin bloquear el
     script de Streamlit, para que el botón Abortar pueda reaccionar mientras
@@ -551,6 +610,8 @@ def main():
         "Usuario/password de Tourplan se guardan localmente en esta PC (⚙️ Configuración) — "
         "nunca se suben al repositorio ni se comparten con el resto del equipo."
     )
+
+    render_aviso_pendientes()
 
     render_sidebar_nav()
     if st.session_state["vista"] == "config":
