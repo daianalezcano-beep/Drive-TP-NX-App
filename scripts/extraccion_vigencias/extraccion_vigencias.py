@@ -500,6 +500,80 @@ def _completar_filtros_busqueda(driver, location, supplier, codigo, service_type
     time.sleep(6 * VELOCIDAD)
 
 
+def _en_contexto_producto(driver):
+    """Confirma que el driver quedó parado en un producto (menú con
+    RATES/UTILITIES/etc.), abriendo y volviendo a cerrar el menú
+    hamburguesa. Extraída de buscar_producto() para poder reusarla desde
+    el atajo de navegación _saltar_a_producto_via_lupa()."""
+    try:
+        img = WebDriverWait(driver, 4).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "nav img")))
+        jc(driver, img)
+        time.sleep(2 * VELOCIDAD)
+        items = driver.execute_script("""
+            return Array.from(document.querySelectorAll('nav ul > li')).map(function(li){
+                return (li.querySelector('div div')||li).innerText.trim().split('\\n')[0].toUpperCase();
+            });
+        """) or []
+        ok = "RATES" in items
+        jc(driver, img)
+        time.sleep(1)
+        return ok, items
+    except Exception:
+        return False, []
+
+
+def _saltar_a_producto_via_lupa(driver, codigo):
+    """Atajo de navegación: si el driver ya está en #/product con un
+    producto abierto de una búsqueda anterior (sin pasar por #/home de
+    por medio), clickear la lupa reabre un popover con la MISMA lista de
+    resultados de esa búsqueda, en vez del modal completo de Product
+    Search — evita repetir Location/Supplier/Service Type y el reset de
+    página que hace buscar_producto() en cada código.
+
+    Confirmado por la usuaria con grabación de Chrome DevTools Recorder
+    (2026-09): la primera fila del popover es SIEMPRE el producto en el
+    que ya se está parado (no una opción real de la lista) — se
+    descarta siempre, nunca se clickea. El resto de las filas son las
+    mismas opciones de la búsqueda original.
+
+    Devuelve True si encontró el código pedido en el popover, lo clickeó
+    y confirmó contexto de producto. Devuelve False ante cualquier
+    duda (lupa no disponible, popover no cargó, código no está en esa
+    lista, o no quedó en contexto) — el llamador debe recurrir a
+    buscar_producto() en ese caso, que resetea la página de cero."""
+    try:
+        lupa = wait(driver, "#searchWrapper li:nth-of-type(2) button", t=4)
+        jc(driver, lupa)
+        time.sleep(2 * VELOCIDAD)
+    except Exception:
+        return False
+
+    cod_upper = (codigo or "").strip().upper()
+    clicked = driver.execute_script("""
+        var cod = arguments[0];
+        var dialogs = document.querySelectorAll('tp-dialog');
+        if (!dialogs.length) return null;
+        var dlg = dialogs.length > 1 ? dialogs[1] : dialogs[0];
+        var rows = Array.from(dlg.querySelectorAll('tr')).slice(1);
+        for (var tr of rows){
+            var celda = tr.querySelector('td.tpcol-optioncode');
+            if (celda && celda.innerText.trim().toUpperCase() === cod){
+                celda.click();
+                return celda.innerText.trim();
+            }
+        }
+        return null;
+    """, cod_upper)
+
+    if not clicked:
+        return False
+
+    time.sleep(4 * VELOCIDAD)
+    ok_ctx, _ = _en_contexto_producto(driver)
+    return ok_ctx
+
+
 def buscar_producto(driver, location, supplier, codigo, service_type=None):
     """Busca Location/Supplier/Code(/ServiceType) en Product Search,
     abre el resultado y confirma que quedó en contexto de producto
@@ -512,24 +586,6 @@ def buscar_producto(driver, location, supplier, codigo, service_type=None):
           f"{('/' + st_upper) if st_upper else ''}")
 
     _completar_filtros_busqueda(driver, location, supplier, codigo, service_type)
-
-    def _en_contexto_producto():
-        try:
-            img = WebDriverWait(driver, 4).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "nav img")))
-            jc(driver, img)
-            time.sleep(2 * VELOCIDAD)
-            items = driver.execute_script("""
-                return Array.from(document.querySelectorAll('nav ul > li')).map(function(li){
-                    return (li.querySelector('div div')||li).innerText.trim().split('\\n')[0].toUpperCase();
-                });
-            """) or []
-            ok = "RATES" in items
-            jc(driver, img)
-            time.sleep(1)
-            return ok, items
-        except Exception:
-            return False, []
 
     clicked = driver.execute_script("""
         var cod = (arguments[0] || '').toUpperCase();
@@ -570,7 +626,7 @@ def buscar_producto(driver, location, supplier, codigo, service_type=None):
             f"codigo={codigo!r} service_type={service_type!r})")
 
     time.sleep(6 * VELOCIDAD)
-    ok_ctx, menu_items = _en_contexto_producto()
+    ok_ctx, menu_items = _en_contexto_producto(driver)
     if not ok_ctx:
         ss(driver, f"ps_contexto_incorrecto_{(codigo or 'sin_codigo')[:10]}")
         raise ProductoNoEncontrado(
@@ -945,11 +1001,17 @@ def procesar_fila_producto(driver, row):
 
     filas_vigencias = []
     fallidos = []
-    for item in items:
+    for idx, item in enumerate(items):
         chequear_abort()
         cod = item["codigo"]
         try:
-            buscar_producto(driver, location, supplier, cod, service_type=service_type)
+            # A partir del 2do código, el driver ya está parado en un
+            # producto de la búsqueda anterior — probar el atajo de la
+            # lupa antes de recurrir a la búsqueda completa (que resetea
+            # la página de cero). Ver _saltar_a_producto_via_lupa().
+            saltado = idx > 0 and _saltar_a_producto_via_lupa(driver, cod)
+            if not saltado:
+                buscar_producto(driver, location, supplier, cod, service_type=service_type)
             periodos = leer_vigencias_codigo(driver, cod)
             if not periodos:
                 fallidos.append(f"{cod}: sin períodos de RATES")

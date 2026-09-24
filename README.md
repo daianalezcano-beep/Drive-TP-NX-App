@@ -343,6 +343,47 @@ Colab ya probado ahí (según el repo origen), pero no desde `scripts/
 extraccion_vigencias/`. Verificado en este repo solo con `python -m
 py_compile` y con un import en limpio de `app.py` (sin correr Selenium).
 
+## Optimización de navegación (Extracción de Vigencias) — atajo de la lupa
+
+Detectado por la usuaria (grabaciones de Chrome DevTools Recorder,
+2026-09): cuando una fila de PRODUCTOS no trae `CODIGO` puntual,
+`listar_codigos_supplier()` ya trae de una sola vez **toda** la lista de
+códigos que matchean Location/Supplier/Service Type — pero el loop que
+la procesa después igual llamaba a `buscar_producto()` por cada código,
+que resetea la página entera (`driver.get(#/home)` → `driver.get(#/product)`)
+y retipea Location/Supplier/Service Type/Code de cero, aunque ya se tuviera
+la lista completa de antemano.
+
+La documentación de la skill `buscando-productos-en-tourplan` ya tenía
+anotado el motivo del reset: si el driver sigue en `#/product` sin pasar
+por `#/home`, la lupa abre un **popover de búsqueda rápida** (la misma
+lista de resultados de la búsqueda anterior) en vez del modal completo —
+comportamiento evitado a propósito en el resto de los scripts porque
+nunca se había confirmado cómo operarlo. La usuaria lo confirmó con dos
+grabaciones reales, incluyendo un detalle no obvio: **la primera fila del
+popover es siempre el producto en el que ya se está parado** (no una
+opción real de la lista) — hay que descartarla siempre y buscar el
+código pedido a partir de la segunda fila.
+
+Ahora, a partir del 2do código de cada fila, `procesar_fila_producto()`
+prueba primero `_saltar_a_producto_via_lupa()` (clickea la lupa, busca en
+el popover la fila cuyo `td.tpcol-optioncode` matchea el código exacto —
+nunca la primera fila, nunca por posición fija — y confirma contexto de
+producto igual que `buscar_producto()`). Si no encuentra el código ahí, o
+algo no cierra, cae de vuelta a `buscar_producto()` normal (el camino
+lento pero ya validado) — nunca se queda en un estado ambiguo. La
+verificación de contexto (`_en_contexto_producto()`) se extrajo de
+`buscar_producto()` a nivel de módulo para reusarla desde el atajo, sin
+duplicar la lógica.
+
+**Sin correr todavía contra Tourplan real** — implementado a partir de
+las grabaciones de la usuaria, pero el atajo en sí (selector del popover,
+`tp-dialog` de índice 1, descarte de la primera fila) todavía no se
+probó en una corrida real. Probar primero con una fila que tenga 2+
+códigos del mismo supplier/location/service type y confirmar en las
+capturas que el segundo código en adelante entra por el atajo (más
+rápido, sin el reset de página) y llega al mismo lugar que antes.
+
 ## URL de Tourplan — producción por default, editable
 
 El campo de URL viene precargado con `https://tourplannx.eurotur.com.ar/tourplannx`
@@ -1182,6 +1223,21 @@ correctamente.
       scripts que repiten Product Search en un loop (ver secciones
       "Optimización de navegación" arriba, que agrupan por servicio
       madre/componente pero no reusan la grilla de resultados en sí).
+- [x] Portar el atajo de la lupa (idea de arriba) a **Extracción de
+      Vigencias** — confirmado con grabaciones de la usuaria, incluyendo
+      el detalle no obvio de que la primera fila del popover es siempre
+      el producto actual (ver sección "Optimización de navegación
+      (Extracción de Vigencias)" arriba). Hecho, con fallback automático
+      a `buscar_producto()` si el atajo no encuentra el código.
+- [ ] Validar contra Tourplan real el atajo de la lupa en Extracción de
+      Vigencias (ver sección arriba) — implementado a partir de
+      grabaciones, todavía no corrido. Probar con una fila que tenga 2+
+      códigos del mismo supplier/location/service type.
+- [ ] Evaluar portar el mismo atajo de la lupa a Valorización desde
+      Excel (el caso original grabado) y a los demás scripts que no
+      agrupan hoy por producto/servicio madre (Flag as Deleted,
+      Modificar Description y Comment, Copy y Linkeo PCM) — recién
+      después de validar el de Vigencias contra Tourplan real.
 
 ## Estructura
 
