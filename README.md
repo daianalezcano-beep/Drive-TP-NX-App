@@ -1161,6 +1161,27 @@ correctamente.
       Seguridad).
 - [ ] Empaquetar como ejecutable de Windows (evaluando PyInstaller) para que
       el equipo no técnico abra la app con doble clic sin instalar Python.
+- [ ] Optimización de navegación pendiente (idea de la usuaria, 2026-09-24,
+      con grabación de Chrome DevTools Recorder de un caso real en
+      Valorización desde Excel — `valorizacion_desde_excel.py`): hoy, al
+      terminar de valorizar un servicio (SAVE) y pasar al siguiente
+      `SERVICE_CODE` de la misma fila/lote, el script sale del producto y
+      arma una búsqueda (Product Search) nueva de cero — vuelve a tipear
+      Location/Supplier/Service Type/Code y esperar a que cargue la grilla
+      de resultados. La grabación muestra que, si en vez de salir del todo
+      se clickea la lupa de búsqueda, la MISMA grilla de resultados sigue
+      disponible con las opciones ya listadas (se ve un click directo sobre
+      la fila de otro option code, ej. "CAECMV", dentro de esa grilla) — se
+      podría pasar al siguiente servicio clickeando su fila ahí directo, sin
+      repetir la búsqueda completa, cuando el siguiente `SERVICE_CODE` a
+      procesar comparte Location/Supplier/Service Type con el anterior.
+      Pendiente: confirmar con una grabación/inspección de HTML si esa
+      grilla efectivamente persiste tras un SAVE (no solo tras cancelar la
+      búsqueda) y con qué selector se abre desde ahí antes de portar el
+      cambio — no implementado todavía, y evaluar si aplica también a otros
+      scripts que repiten Product Search en un loop (ver secciones
+      "Optimización de navegación" arriba, que agrupan por servicio
+      madre/componente pero no reusan la grilla de resultados en sí).
 
 ## Estructura
 
