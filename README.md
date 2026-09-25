@@ -365,9 +365,9 @@ popover es siempre el producto en el que ya se está parado** (no una
 opción real de la lista) — hay que descartarla siempre y buscar el
 código pedido a partir de la segunda fila.
 
-Ahora, a partir del 2do código de cada fila, `procesar_fila_producto()`
-prueba primero `_saltar_a_producto_via_lupa()` (clickea la lupa, busca en
-el popover la fila cuyo `td.tpcol-optioncode` matchea el código exacto —
+A partir del 2do código de cada fila, `procesar_fila_producto()` prueba
+primero `_saltar_a_producto_via_lupa()` (clickea la lupa, busca en el
+popover la fila cuyo `td.tpcol-optioncode` matchea el código exacto —
 nunca la primera fila, nunca por posición fija — y confirma contexto de
 producto igual que `buscar_producto()`). Si no encuentra el código ahí, o
 algo no cierra, cae de vuelta a `buscar_producto()` normal (el camino
@@ -376,13 +376,38 @@ verificación de contexto (`_en_contexto_producto()`) se extrajo de
 `buscar_producto()` a nivel de módulo para reusarla desde el atajo, sin
 duplicar la lógica.
 
+**Segunda vuelta (la usuaria probó la primera versión y no alcanzaba):**
+en su uso real, no es una fila con `CODIGO` vacío y muchos códigos adentro
+— es una fila **por código**, muchas filas del **mismo proveedor**. El
+atajo de arriba solo encadenaba códigos DENTRO de una fila, así que cada
+fila nueva seguía reseteando la página igual que antes. Se agregó
+encadenamiento también **entre filas**:
+
+- `_agrupar_por_busqueda()` (mismo patrón que `_agrupar_por_origen()` en
+  Copy Products / `_agrupar_por_producto()` en Notas SRV) agrupa las
+  filas PENDIENTE que comparten LOCATION+SUPPLIER+SERVICE TYPE completos
+  (nunca si alguno vino vacío — un match con campos en blanco no
+  garantiza que sea el mismo proveedor), preservando el orden.
+- La primera fila de un grupo de 2+ se abre con `_abrir_primero_de_grupo()`:
+  busca **sin** mandar el código al filtro (a diferencia de
+  `buscar_producto()`, que si lo manda) — así Tourplan deja la lista
+  completa de resultados del proveedor en pantalla, no acotada a un solo
+  código, y las filas siguientes del grupo tienen algo para elegir en el
+  popover de la lupa. Escrollea de a poco buscando la fila (mismo patrón
+  progresivo que `listar_codigos_supplier()`, sin cachear filas por
+  índice — grilla virtual).
+- Las filas siguientes del mismo grupo entran directo por
+  `_saltar_a_producto_via_lupa()` (mismo atajo de arriba), sin volver a
+  pasar por `_completar_filtros_busqueda()`.
+
 **Sin correr todavía contra Tourplan real** — implementado a partir de
-las grabaciones de la usuaria, pero el atajo en sí (selector del popover,
-`tp-dialog` de índice 1, descarte de la primera fila) todavía no se
-probó en una corrida real. Probar primero con una fila que tenga 2+
-códigos del mismo supplier/location/service type y confirmar en las
-capturas que el segundo código en adelante entra por el atajo (más
-rápido, sin el reset de página) y llega al mismo lugar que antes.
+las grabaciones de la usuaria, pero ninguna de las dos capas (atajo
+dentro de una fila, ni el encadenamiento entre filas del mismo
+proveedor) se probó en una corrida real todavía. Probar primero con 2+
+filas PENDIENTE del mismo LOCATION/SUPPLIER/SERVICE TYPE (cada una con
+su propio CODIGO) y confirmar en las capturas que la primera busca sin
+acotar por código, las siguientes entran por la lupa, y cada una llega
+al producto correcto (mismo código pedido, no el de al lado).
 
 ## URL de Tourplan — producción por default, editable
 
@@ -1229,15 +1254,24 @@ correctamente.
       el producto actual (ver sección "Optimización de navegación
       (Extracción de Vigencias)" arriba). Hecho, con fallback automático
       a `buscar_producto()` si el atajo no encuentra el código.
-- [ ] Validar contra Tourplan real el atajo de la lupa en Extracción de
-      Vigencias (ver sección arriba) — implementado a partir de
-      grabaciones, todavía no corrido. Probar con una fila que tenga 2+
-      códigos del mismo supplier/location/service type.
-- [ ] Evaluar portar el mismo atajo de la lupa a Valorización desde
-      Excel (el caso original grabado) y a los demás scripts que no
-      agrupan hoy por producto/servicio madre (Flag as Deleted,
-      Modificar Description y Comment, Copy y Linkeo PCM) — recién
-      después de validar el de Vigencias contra Tourplan real.
+- [x] Extender el atajo de la lupa en Vigencias para encadenar también
+      **entre filas** del mismo LOCATION+SUPPLIER+SERVICE TYPE (no solo
+      entre códigos de una misma fila) — la primera versión no alcanzaba
+      porque el uso real es una fila por código, no una fila con varios
+      códigos adentro. Agregado `_agrupar_por_busqueda()` +
+      `_abrir_primero_de_grupo()` (ver sección arriba, "Segunda vuelta").
+- [ ] Validar contra Tourplan real las dos capas del atajo de la lupa en
+      Extracción de Vigencias (ver sección arriba) — implementado a
+      partir de grabaciones, ninguna de las dos corrida todavía. Probar
+      con 2+ filas PENDIENTE del mismo LOCATION/SUPPLIER/SERVICE TYPE
+      (cada una con su propio CODIGO) y confirmar que cada una llega al
+      código correcto, no al de al lado.
+- [ ] Evaluar portar el mismo atajo de la lupa (dentro de fila y/o entre
+      filas del mismo proveedor) a Valorización desde Excel (el caso
+      original grabado) y a los demás scripts que no agrupan hoy por
+      producto/servicio madre (Flag as Deleted, Modificar Description y
+      Comment, Copy y Linkeo PCM) — recién después de validar el de
+      Vigencias contra Tourplan real.
 
 ## Estructura
 

@@ -574,6 +574,80 @@ def _saltar_a_producto_via_lupa(driver, codigo):
     return ok_ctx
 
 
+def _abrir_primero_de_grupo(driver, location, supplier, codigo, service_type=None):
+    """Abre el primer código de un grupo de 2+ filas del mismo
+    LOCATION+SUPPLIER+SERVICE TYPE (ver _agrupar_por_busqueda): busca
+    SIN el código en el filtro — deja la lista completa de resultados
+    en pantalla, igual que listar_codigos_supplier() — y clickea la
+    fila que matchea el código pedido.
+
+    A diferencia de buscar_producto(), que sí manda el código al filtro
+    de búsqueda (Tourplan devuelve un resultado acotado a ese código
+    puntual), acá se necesita la lista SIN acotar para que las filas
+    siguientes del grupo puedan usar el atajo de la lupa
+    (_saltar_a_producto_via_lupa) — si la búsqueda quedara acotada por
+    código, el popover de la lupa no tendría al resto de las opciones
+    del grupo para elegir.
+
+    Escrollea de a poco buscando la fila en cada paso (misma grilla
+    virtual sin paginación que listar_codigos_supplier(), reutilizando
+    _hacer_scroll_resultados) — nunca asume que ya escrolleó lo
+    suficiente ni cachea filas por índice, para no toparse con el mismo
+    problema de corrupción por virtual scroll ya documentado para estas
+    grillas."""
+    codigo = str(codigo).strip() if codigo not in (None, "") else ""
+    location = str(location).strip() if location not in (None, "") else ""
+    supplier = str(supplier).strip() if supplier not in (None, "") else ""
+    st_upper = (service_type or "").strip().upper()
+    print(f"\n  📦 Buscando (grupo, sin filtrar código): {location}/{supplier}"
+          f"{('/' + st_upper) if st_upper else ''} → {codigo}")
+
+    _completar_filtros_busqueda(driver, location, supplier, "", service_type)
+
+    cod_upper = codigo.upper()
+
+    def _click_si_esta():
+        return driver.execute_script("""
+            var cod = arguments[0];
+            var rows = Array.from(document.querySelectorAll('table tbody tr'));
+            for (var tr of rows){
+                var tds = Array.from(tr.querySelectorAll('td'));
+                var hasCod = tds.some(function(td){
+                    return td.children.length===0 && td.innerText.trim().toUpperCase()===cod;
+                });
+                if (hasCod){
+                    var target = tds.length > 4 ? tds[4] : tds[tds.length-1];
+                    target.click();
+                    return target.innerText.trim().slice(0,50) || 'clicked';
+                }
+            }
+            return null;
+        """, cod_upper)
+
+    clicked = _click_si_esta()
+    intentos = 0
+    while not clicked and intentos < 40:
+        if not _hacer_scroll_resultados(driver):
+            break
+        time.sleep(0.4 * VELOCIDAD)
+        clicked = _click_si_esta()
+        intentos += 1
+
+    if not clicked:
+        ss(driver, f"ps_grupo_sin_resultado_{(codigo or 'sin_codigo')[:10]}")
+        raise ProductoNoEncontrado(
+            f"Producto no encontrado en la lista del grupo (location={location!r} "
+            f"supplier={supplier!r} codigo={codigo!r} service_type={service_type!r})")
+
+    time.sleep(6 * VELOCIDAD)
+    ok_ctx, menu_items = _en_contexto_producto(driver)
+    if not ok_ctx:
+        ss(driver, f"ps_grupo_contexto_incorrecto_{(codigo or 'sin_codigo')[:10]}")
+        raise ProductoNoEncontrado(
+            f"Click en resultado OK pero no quedó en contexto de producto "
+            f"(menú visto: {menu_items}) — codigo={codigo!r}")
+
+
 def buscar_producto(driver, location, supplier, codigo, service_type=None):
     """Busca Location/Supplier/Code(/ServiceType) en Product Search,
     abre el resultado y confirma que quedó en contexto de producto
@@ -904,6 +978,36 @@ def leer_vigencias_codigo(driver, codigo):
     return periodos
 
 
+def _clave_busqueda(row):
+    """Identidad de búsqueda de una fila: mismo LOCATION+SUPPLIER+SERVICE
+    TYPE → misma lista de resultados en Product Search. Usada para
+    encadenar filas del mismo proveedor y reusar el atajo de la lupa
+    entre ellas (ver _agrupar_por_busqueda)."""
+    return (
+        str(row.get("LOCATION") or "").strip().upper(),
+        str(row.get("SUPPLIER") or "").strip().upper(),
+        str(row.get("SERVICE TYPE") or "").strip().upper(),
+    )
+
+
+def _agrupar_por_busqueda(pendientes):
+    """Agrupa las filas PENDIENTE que comparten LOCATION+SUPPLIER+SERVICE
+    TYPE (mismo proveedor/rubro/location — típicamente una fila por
+    CODIGO), preservando el orden relativo dentro de cada grupo y el
+    orden de aparición de los grupos. Mismo patrón que
+    _agrupar_por_origen() en copy_products.py / _agrupar_por_producto()
+    en notas_srv.py."""
+    grupos = {}
+    orden = []
+    for row in pendientes:
+        clave = _clave_busqueda(row)
+        if clave not in grupos:
+            grupos[clave] = []
+            orden.append(clave)
+        grupos[clave].append(row)
+    return [grupos[clave] for clave in orden]
+
+
 # ── Sheets como cola de trabajo (ver skill armando-excel-como-cola-de-trabajo) ──
 
 VIGENCIAS_HEADERS = [
@@ -961,7 +1065,8 @@ def agregar_filas_vigencias(ws_vigencias, filas):
 
 # ── Lógica de negocio por fila de PRODUCTOS ─────────────────────────
 
-def procesar_fila_producto(driver, row):
+def procesar_fila_producto(driver, row, continuar_grupo=False,
+                            primero_de_grupo_multiple=False):
     """Procesa una fila de PRODUCTOS: resuelve uno o varios códigos,
     entra a RATES de cada uno y exporta el/los período(s) que
     correspondan según RATE FROM/RATE TO. Nunca lanza fuera de esta
@@ -973,7 +1078,19 @@ def procesar_fila_producto(driver, row):
     "todos" en esa dimensión (ej. SERVICE TYPE vacío = todos los service
     types). Pero para no disparar una búsqueda sin acotar en Tourplan,
     deben venir completos AL MENOS 2 de los 4 campos LOCATION/SUPPLIER/
-    SERVICE TYPE/CODIGO, en cualquier combinación."""
+    SERVICE TYPE/CODIGO, en cualquier combinación.
+
+    continuar_grupo / primero_de_grupo_multiple: encadenamiento entre
+    FILAS del mismo LOCATION+SUPPLIER+SERVICE TYPE (ver
+    _agrupar_por_busqueda(), llamado desde main()) — no solo entre
+    códigos de una misma fila. continuar_grupo=True significa que el
+    driver ya está parado en un producto abierto por la fila anterior
+    del mismo grupo: se prueba el atajo de la lupa antes que
+    buscar_producto(). primero_de_grupo_multiple=True es la primera
+    fila de un grupo con más filas después: se abre con
+    _abrir_primero_de_grupo() (búsqueda SIN acotar por código) para que
+    las filas siguientes tengan la lista completa disponible en el
+    popover de la lupa."""
     location = str(row.get("LOCATION") or "").strip()
     supplier = str(row.get("SUPPLIER") or "").strip()
     service_type = str(row.get("SERVICE TYPE") or "").strip()
@@ -1005,11 +1122,23 @@ def procesar_fila_producto(driver, row):
         chequear_abort()
         cod = item["codigo"]
         try:
-            # A partir del 2do código, el driver ya está parado en un
-            # producto de la búsqueda anterior — probar el atajo de la
-            # lupa antes de recurrir a la búsqueda completa (que resetea
-            # la página de cero). Ver _saltar_a_producto_via_lupa().
-            saltado = idx > 0 and _saltar_a_producto_via_lupa(driver, cod)
+            if idx == 0 and codigo and continuar_grupo:
+                # Primer (y único) código de esta fila, pero seguimos un
+                # grupo ya abierto por una fila anterior del mismo
+                # proveedor — probar el atajo de la lupa antes de nada.
+                saltado = _saltar_a_producto_via_lupa(driver, cod)
+            elif idx == 0 and codigo and primero_de_grupo_multiple:
+                # Primera fila de un grupo con más filas después: abrir
+                # SIN acotar por código, para dejar la lista completa
+                # disponible en el popover de la lupa para las próximas.
+                _abrir_primero_de_grupo(driver, location, supplier, cod, service_type=service_type)
+                saltado = True
+            else:
+                # A partir del 2do código DENTRO de esta misma fila, el
+                # driver ya está parado en un producto de la búsqueda
+                # anterior — probar el atajo de la lupa antes de recurrir
+                # a la búsqueda completa (que resetea la página de cero).
+                saltado = idx > 0 and _saltar_a_producto_via_lupa(driver, cod)
             if not saltado:
                 buscar_producto(driver, location, supplier, cod, service_type=service_type)
             periodos = leer_vigencias_codigo(driver, cod)
@@ -1083,32 +1212,45 @@ def main():
     try:
         login(driver)
 
-        for n, row in enumerate(pendientes, start=1):
-            chequear_abort()
-            row_idx = row["__row_idx__"]
-            print(f"\n{'─' * 60}")
-            print(f"[{n}/{len(pendientes)}] Fila {row_idx}: "
-                  f"LOCATION={row.get('LOCATION') or '(todas)'} "
-                  f"SUPPLIER={row.get('SUPPLIER') or '(todos)'} "
-                  f"SERVICE TYPE={row.get('SERVICE TYPE') or '(todos)'} "
-                  f"CODIGO={row.get('CODIGO') or '(todos)'}")
+        grupos = _agrupar_por_busqueda(pendientes)
+        n = 0
+        for grupo in grupos:
+            clave = _clave_busqueda(grupo[0])
+            # Solo se encadena cuando LOCATION+SUPPLIER+SERVICE TYPE
+            # vinieron los 3 completos — un match coincidente con campos
+            # vacíos no es garantía de que sean el mismo proveedor.
+            grupo_multiple = len(grupo) > 1 and all(clave)
+            for idx_en_grupo, row in enumerate(grupo):
+                n += 1
+                chequear_abort()
+                row_idx = row["__row_idx__"]
+                print(f"\n{'─' * 60}")
+                print(f"[{n}/{len(pendientes)}] Fila {row_idx}: "
+                      f"LOCATION={row.get('LOCATION') or '(todas)'} "
+                      f"SUPPLIER={row.get('SUPPLIER') or '(todos)'} "
+                      f"SERVICE TYPE={row.get('SERVICE TYPE') or '(todos)'} "
+                      f"CODIGO={row.get('CODIGO') or '(todos)'}")
 
-            estado, observaciones, filas_vigencias = "ERROR", "Error desconocido", []
-            try:
-                estado, observaciones, filas_vigencias = procesar_fila_producto(driver, row)
-            except Exception:
-                # Un error en ESTA fila no frena el resto del batch — se
-                # registra y se sigue con la próxima.
-                estado = "ERROR"
-                observaciones = traceback.format_exc(limit=3)
-                ss(driver, f"error_fila_{row_idx}")
+                estado, observaciones, filas_vigencias = "ERROR", "Error desconocido", []
+                try:
+                    estado, observaciones, filas_vigencias = procesar_fila_producto(
+                        driver, row,
+                        continuar_grupo=grupo_multiple and idx_en_grupo > 0,
+                        primero_de_grupo_multiple=grupo_multiple and idx_en_grupo == 0,
+                    )
+                except Exception:
+                    # Un error en ESTA fila no frena el resto del batch — se
+                    # registra y se sigue con la próxima.
+                    estado = "ERROR"
+                    observaciones = traceback.format_exc(limit=3)
+                    ss(driver, f"error_fila_{row_idx}")
 
-            print(f"  Estado: {estado} — {observaciones}")
-            # Guardar INMEDIATAMENTE (filas RATES + estado de la fila
-            # PRODUCTOS) — así una corrida cortada a mitad de camino deja
-            # registro de lo ya procesado.
-            agregar_filas_vigencias(ws_vigencias, filas_vigencias)
-            actualizar_fila_producto(ws, columnas, row_idx, estado, observaciones)
+                print(f"  Estado: {estado} — {observaciones}")
+                # Guardar INMEDIATAMENTE (filas RATES + estado de la fila
+                # PRODUCTOS) — así una corrida cortada a mitad de camino
+                # deja registro de lo ya procesado.
+                agregar_filas_vigencias(ws_vigencias, filas_vigencias)
+                actualizar_fila_producto(ws, columnas, row_idx, estado, observaciones)
 
     except AbortadoPorUsuario:
         _abortado = True
