@@ -385,29 +385,44 @@ encadenamiento también **entre filas**:
 
 - `_agrupar_por_busqueda()` (mismo patrón que `_agrupar_por_origen()` en
   Copy Products / `_agrupar_por_producto()` en Notas SRV) agrupa las
-  filas PENDIENTE que comparten LOCATION+SUPPLIER+SERVICE TYPE completos
-  (nunca si alguno vino vacío — un match con campos en blanco no
-  garantiza que sea el mismo proveedor), preservando el orden.
+  filas PENDIENTE que comparten **SUPPLIER** — solo eso, no
+  LOCATION/SERVICE TYPE: la usuaria confirmó que buscando en Tourplan
+  solo por proveedor, la lupa lista todos los locations/service types
+  de ese proveedor (ordenados alfabéticamente por LOCATION), así que un
+  grupo puede incluir filas con distinto LOCATION/SERVICE TYPE mientras
+  compartan el mismo SUPPLIER. Nunca se encadena si SUPPLIER vino
+  vacío. Preserva el orden.
 - La primera fila de un grupo de 2+ se abre con `_abrir_primero_de_grupo()`:
-  busca **sin** mandar el código al filtro (a diferencia de
-  `buscar_producto()`, que si lo manda) — así Tourplan deja la lista
-  completa de resultados del proveedor en pantalla, no acotada a un solo
-  código, y las filas siguientes del grupo tienen algo para elegir en el
-  popover de la lupa. Escrollea de a poco buscando la fila (mismo patrón
-  progresivo que `listar_codigos_supplier()`, sin cachear filas por
-  índice — grilla virtual).
+  busca **solo por proveedor** — sin LOCATION, sin SERVICE TYPE, sin el
+  código en el filtro — así Tourplan deja la lista más amplia posible
+  en pantalla (todo lo de ese proveedor) y las filas siguientes del
+  grupo, con LOCATION/SERVICE TYPE potencialmente distintos, tienen su
+  código disponible para elegir en el popover de la lupa. Escrollea de
+  a poco buscando la fila (mismo patrón progresivo que
+  `listar_codigos_supplier()`, sin cachear filas por índice — grilla
+  virtual).
 - Las filas siguientes del mismo grupo entran directo por
   `_saltar_a_producto_via_lupa()` (mismo atajo de arriba), sin volver a
-  pasar por `_completar_filtros_busqueda()`.
+  pasar por `_completar_filtros_busqueda()` — también escrollea DENTRO
+  del popover si hace falta, por si el proveedor tiene muchos
+  locations/service types y el código buscado no está entre las
+  primeras filas visibles.
 
 **Sin correr todavía contra Tourplan real** — implementado a partir de
-las grabaciones de la usuaria, pero ninguna de las dos capas (atajo
+lo que describió la usuaria, pero ninguna de las dos capas (atajo
 dentro de una fila, ni el encadenamiento entre filas del mismo
-proveedor) se probó en una corrida real todavía. Probar primero con 2+
-filas PENDIENTE del mismo LOCATION/SUPPLIER/SERVICE TYPE (cada una con
-su propio CODIGO) y confirmar en las capturas que la primera busca sin
-acotar por código, las siguientes entran por la lupa, y cada una llega
-al producto correcto (mismo código pedido, no el de al lado).
+proveedor con distinto LOCATION/SERVICE TYPE) se probó en una corrida
+real todavía. Punto más incierto: si el popover de la lupa realmente
+soporta escrollear para proveedores con muchos resultados, o si solo
+muestra una lista corta/no escrolleable — el código intenta escrollear
+pero no está confirmado que la interfaz lo permita ahí. Probar primero
+con 2+ filas PENDIENTE del mismo SUPPLIER pero **distinto**
+LOCATION/SERVICE TYPE (cada una con su propio CODIGO) y confirmar en
+las capturas que la primera busca solo por proveedor, las siguientes
+entran por la lupa, y cada una llega al producto correcto (mismo
+código pedido, no el de al lado) — prestar especial atención si alguna
+de esas filas tiene un código que no aparece "arriba de todo" en la
+lista del proveedor.
 
 ## URL de Tourplan — producción por default, editable
 
@@ -1255,17 +1270,29 @@ correctamente.
       (Extracción de Vigencias)" arriba). Hecho, con fallback automático
       a `buscar_producto()` si el atajo no encuentra el código.
 - [x] Extender el atajo de la lupa en Vigencias para encadenar también
-      **entre filas** del mismo LOCATION+SUPPLIER+SERVICE TYPE (no solo
-      entre códigos de una misma fila) — la primera versión no alcanzaba
-      porque el uso real es una fila por código, no una fila con varios
-      códigos adentro. Agregado `_agrupar_por_busqueda()` +
-      `_abrir_primero_de_grupo()` (ver sección arriba, "Segunda vuelta").
-- [ ] Validar contra Tourplan real las dos capas del atajo de la lupa en
-      Extracción de Vigencias (ver sección arriba) — implementado a
-      partir de grabaciones, ninguna de las dos corrida todavía. Probar
-      con 2+ filas PENDIENTE del mismo LOCATION/SUPPLIER/SERVICE TYPE
-      (cada una con su propio CODIGO) y confirmar que cada una llega al
-      código correcto, no al de al lado.
+      **entre filas** del mismo proveedor (no solo entre códigos de una
+      misma fila) — la primera versión no alcanzaba porque el uso real
+      es una fila por código, no una fila con varios códigos adentro.
+      Agregado `_agrupar_por_busqueda()` + `_abrir_primero_de_grupo()`
+      (ver sección arriba, "Segunda vuelta").
+- [x] Ampliar el agrupamiento de SUPPLIER+LOCATION+SERVICE TYPE a
+      **SUPPLIER solo** — la usuaria confirmó que buscando únicamente
+      por proveedor, la lupa lista todos los locations/service types de
+      ese proveedor (ordenados alfabéticamente por LOCATION), así que
+      filas con distinto LOCATION/SERVICE TYPE pero mismo SUPPLIER
+      también encadenan. Se agregó además un escrolleo dentro del
+      popover de la lupa por si el proveedor tiene muchos resultados
+      (ver sección arriba).
+- [ ] Validar contra Tourplan real las tres capas del atajo de la lupa
+      en Extracción de Vigencias (ver sección arriba) — implementado a
+      partir de lo que describió la usuaria, ninguna corrida todavía.
+      Punto más incierto: si el popover de la lupa realmente soporta
+      escrollear para proveedores con muchos resultados. Probar con 2+
+      filas PENDIENTE del mismo SUPPLIER pero **distinto**
+      LOCATION/SERVICE TYPE (cada una con su propio CODIGO) y confirmar
+      que cada una llega al código correcto, no al de al lado —
+      especialmente una cuyo código no esté "arriba de todo" en la
+      lista del proveedor.
 - [ ] Evaluar portar el mismo atajo de la lupa (dentro de fila y/o entre
       filas del mismo proveedor) a Valorización desde Excel (el caso
       original grabado) y a los demás scripts que no agrupan hoy por

@@ -541,7 +541,13 @@ def _saltar_a_producto_via_lupa(driver, codigo):
     y confirmó contexto de producto. Devuelve False ante cualquier
     duda (lupa no disponible, popover no cargó, código no está en esa
     lista, o no quedó en contexto) — el llamador debe recurrir a
-    buscar_producto() en ese caso, que resetea la página de cero."""
+    buscar_producto() en ese caso, que resetea la página de cero.
+
+    Si el grupo es solo por proveedor (ver _agrupar_por_busqueda), el
+    popover puede traer resultados de varios locations/service types —
+    escrollea de a poco DENTRO del popover buscando la fila en cada
+    paso (mismo patrón progresivo que _abrir_primero_de_grupo(), sin
+    cachear filas por índice) antes de rendirse."""
     try:
         lupa = wait(driver, "#searchWrapper li:nth-of-type(2) button", t=4)
         jc(driver, lupa)
@@ -550,21 +556,51 @@ def _saltar_a_producto_via_lupa(driver, codigo):
         return False
 
     cod_upper = (codigo or "").strip().upper()
-    clicked = driver.execute_script("""
-        var cod = arguments[0];
-        var dialogs = document.querySelectorAll('tp-dialog');
-        if (!dialogs.length) return null;
-        var dlg = dialogs.length > 1 ? dialogs[1] : dialogs[0];
-        var rows = Array.from(dlg.querySelectorAll('tr')).slice(1);
-        for (var tr of rows){
-            var celda = tr.querySelector('td.tpcol-optioncode');
-            if (celda && celda.innerText.trim().toUpperCase() === cod){
-                celda.click();
-                return celda.innerText.trim();
+
+    def _click_si_esta():
+        return driver.execute_script("""
+            var cod = arguments[0];
+            var dialogs = document.querySelectorAll('tp-dialog');
+            if (!dialogs.length) return null;
+            var dlg = dialogs.length > 1 ? dialogs[1] : dialogs[0];
+            var rows = Array.from(dlg.querySelectorAll('tr')).slice(1);
+            for (var tr of rows){
+                var celda = tr.querySelector('td.tpcol-optioncode');
+                if (celda && celda.innerText.trim().toUpperCase() === cod){
+                    celda.click();
+                    return celda.innerText.trim();
+                }
             }
-        }
-        return null;
-    """, cod_upper)
+            return null;
+        """, cod_upper)
+
+    def _scroll_popover():
+        return bool(driver.execute_script("""
+            var dialogs = document.querySelectorAll('tp-dialog');
+            if (!dialogs.length) return false;
+            var dlg = dialogs.length > 1 ? dialogs[1] : dialogs[0];
+            var fila = dlg.querySelector('tr');
+            if (!fila) return false;
+            var cur = fila.closest('table');
+            while (cur && cur !== dlg){
+                if (cur.scrollHeight > cur.clientHeight + 5){
+                    var antes = cur.scrollTop;
+                    cur.scrollTop = cur.scrollTop + cur.clientHeight;
+                    return cur.scrollTop > antes;
+                }
+                cur = cur.parentElement;
+            }
+            return false;
+        """))
+
+    clicked = _click_si_esta()
+    intentos = 0
+    while not clicked and intentos < 40:
+        if not _scroll_popover():
+            break
+        time.sleep(0.4 * VELOCIDAD)
+        clicked = _click_si_esta()
+        intentos += 1
 
     if not clicked:
         return False
@@ -574,20 +610,21 @@ def _saltar_a_producto_via_lupa(driver, codigo):
     return ok_ctx
 
 
-def _abrir_primero_de_grupo(driver, location, supplier, codigo, service_type=None):
-    """Abre el primer código de un grupo de 2+ filas del mismo
-    LOCATION+SUPPLIER+SERVICE TYPE (ver _agrupar_por_busqueda): busca
-    SIN el código en el filtro — deja la lista completa de resultados
-    en pantalla, igual que listar_codigos_supplier() — y clickea la
-    fila que matchea el código pedido.
+def _abrir_primero_de_grupo(driver, supplier, codigo):
+    """Abre el primer código de un grupo de 2+ filas del mismo SUPPLIER
+    (ver _agrupar_por_busqueda): busca SOLO por proveedor — sin
+    LOCATION, sin SERVICE TYPE, sin el código en el filtro — deja la
+    lista completa de resultados de ese proveedor en pantalla (todos
+    los locations/service types que tenga, ordenados alfabéticamente
+    por LOCATION según confirmó la usuaria) y clickea la fila que
+    matchea el código pedido.
 
-    A diferencia de buscar_producto(), que sí manda el código al filtro
-    de búsqueda (Tourplan devuelve un resultado acotado a ese código
-    puntual), acá se necesita la lista SIN acotar para que las filas
-    siguientes del grupo puedan usar el atajo de la lupa
-    (_saltar_a_producto_via_lupa) — si la búsqueda quedara acotada por
-    código, el popover de la lupa no tendría al resto de las opciones
-    del grupo para elegir.
+    A diferencia de buscar_producto(), que manda LOCATION+SERVICE
+    TYPE+código al filtro de búsqueda (Tourplan devuelve un resultado
+    acotado a eso puntual), acá se necesita la lista más amplia posible
+    para que las filas siguientes del grupo — con el mismo proveedor
+    pero potencialmente otro LOCATION/SERVICE TYPE — tengan su código
+    disponible en el popover de la lupa (_saltar_a_producto_via_lupa).
 
     Escrollea de a poco buscando la fila en cada paso (misma grilla
     virtual sin paginación que listar_codigos_supplier(), reutilizando
@@ -596,13 +633,10 @@ def _abrir_primero_de_grupo(driver, location, supplier, codigo, service_type=Non
     problema de corrupción por virtual scroll ya documentado para estas
     grillas."""
     codigo = str(codigo).strip() if codigo not in (None, "") else ""
-    location = str(location).strip() if location not in (None, "") else ""
     supplier = str(supplier).strip() if supplier not in (None, "") else ""
-    st_upper = (service_type or "").strip().upper()
-    print(f"\n  📦 Buscando (grupo, sin filtrar código): {location}/{supplier}"
-          f"{('/' + st_upper) if st_upper else ''} → {codigo}")
+    print(f"\n  📦 Buscando (grupo, solo por proveedor): {supplier} → {codigo}")
 
-    _completar_filtros_busqueda(driver, location, supplier, "", service_type)
+    _completar_filtros_busqueda(driver, "", supplier, "", "")
 
     cod_upper = codigo.upper()
 
@@ -979,24 +1013,23 @@ def leer_vigencias_codigo(driver, codigo):
 
 
 def _clave_busqueda(row):
-    """Identidad de búsqueda de una fila: mismo LOCATION+SUPPLIER+SERVICE
-    TYPE → misma lista de resultados en Product Search. Usada para
+    """Identidad de búsqueda de una fila: mismo SUPPLIER → misma lupa de
+    búsqueda en Product Search, aunque LOCATION/SERVICE TYPE difieran
+    entre filas — confirmado por la usuaria: buscando solo por
+    proveedor, Tourplan lista todos los locations/service types de ese
+    proveedor (ordenados alfabéticamente por LOCATION). Usada para
     encadenar filas del mismo proveedor y reusar el atajo de la lupa
     entre ellas (ver _agrupar_por_busqueda)."""
-    return (
-        str(row.get("LOCATION") or "").strip().upper(),
-        str(row.get("SUPPLIER") or "").strip().upper(),
-        str(row.get("SERVICE TYPE") or "").strip().upper(),
-    )
+    return (str(row.get("SUPPLIER") or "").strip().upper(),)
 
 
 def _agrupar_por_busqueda(pendientes):
-    """Agrupa las filas PENDIENTE que comparten LOCATION+SUPPLIER+SERVICE
-    TYPE (mismo proveedor/rubro/location — típicamente una fila por
-    CODIGO), preservando el orden relativo dentro de cada grupo y el
-    orden de aparición de los grupos. Mismo patrón que
-    _agrupar_por_origen() en copy_products.py / _agrupar_por_producto()
-    en notas_srv.py."""
+    """Agrupa las filas PENDIENTE que comparten SUPPLIER (mismo
+    proveedor, sin importar si LOCATION/SERVICE TYPE difieren —
+    típicamente una fila por CODIGO), preservando el orden relativo
+    dentro de cada grupo y el orden de aparición de los grupos. Mismo
+    patrón que _agrupar_por_origen() en copy_products.py /
+    _agrupar_por_producto() en notas_srv.py."""
     grupos = {}
     orden = []
     for row in pendientes:
@@ -1081,10 +1114,10 @@ def procesar_fila_producto(driver, row, continuar_grupo=False,
     SERVICE TYPE/CODIGO, en cualquier combinación.
 
     continuar_grupo / primero_de_grupo_multiple: encadenamiento entre
-    FILAS del mismo LOCATION+SUPPLIER+SERVICE TYPE (ver
-    _agrupar_por_busqueda(), llamado desde main()) — no solo entre
-    códigos de una misma fila. continuar_grupo=True significa que el
-    driver ya está parado en un producto abierto por la fila anterior
+    FILAS del mismo SUPPLIER (ver _agrupar_por_busqueda(), llamado desde
+    main()) — no solo entre códigos de una misma fila.
+    continuar_grupo=True significa que el driver ya está parado en un
+    producto abierto por la fila anterior
     del mismo grupo: se prueba el atajo de la lupa antes que
     buscar_producto(). primero_de_grupo_multiple=True es la primera
     fila de un grupo con más filas después: se abre con
@@ -1128,10 +1161,12 @@ def procesar_fila_producto(driver, row, continuar_grupo=False,
                 # proveedor — probar el atajo de la lupa antes de nada.
                 saltado = _saltar_a_producto_via_lupa(driver, cod)
             elif idx == 0 and codigo and primero_de_grupo_multiple:
-                # Primera fila de un grupo con más filas después: abrir
-                # SIN acotar por código, para dejar la lista completa
-                # disponible en el popover de la lupa para las próximas.
-                _abrir_primero_de_grupo(driver, location, supplier, cod, service_type=service_type)
+                # Primera fila de un grupo con más filas después (mismo
+                # SUPPLIER, sin importar si LOCATION/SERVICE TYPE
+                # difieren): abrir buscando solo por proveedor, para
+                # dejar la lista más amplia posible disponible en el
+                # popover de la lupa para las próximas filas del grupo.
+                _abrir_primero_de_grupo(driver, supplier, cod)
                 saltado = True
             else:
                 # A partir del 2do código DENTRO de esta misma fila, el
@@ -1216,9 +1251,9 @@ def main():
         n = 0
         for grupo in grupos:
             clave = _clave_busqueda(grupo[0])
-            # Solo se encadena cuando LOCATION+SUPPLIER+SERVICE TYPE
-            # vinieron los 3 completos — un match coincidente con campos
-            # vacíos no es garantía de que sean el mismo proveedor.
+            # Solo se encadena cuando SUPPLIER vino completo — un match
+            # coincidente con SUPPLIER vacío no es garantía de que sean
+            # el mismo proveedor.
             grupo_multiple = len(grupo) > 1 and all(clave)
             for idx_en_grupo, row in enumerate(grupo):
                 n += 1
