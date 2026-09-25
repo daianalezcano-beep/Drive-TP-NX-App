@@ -408,21 +408,12 @@ encadenamiento también **entre filas**:
   locations/service types y el código buscado no está entre las
   primeras filas visibles.
 
-**Sin correr todavía contra Tourplan real** — implementado a partir de
-lo que describió la usuaria, pero ninguna de las dos capas (atajo
-dentro de una fila, ni el encadenamiento entre filas del mismo
-proveedor con distinto LOCATION/SERVICE TYPE) se probó en una corrida
-real todavía. Punto más incierto: si el popover de la lupa realmente
-soporta escrollear para proveedores con muchos resultados, o si solo
-muestra una lista corta/no escrolleable — el código intenta escrollear
-pero no está confirmado que la interfaz lo permita ahí. Probar primero
-con 2+ filas PENDIENTE del mismo SUPPLIER pero **distinto**
-LOCATION/SERVICE TYPE (cada una con su propio CODIGO) y confirmar en
-las capturas que la primera busca solo por proveedor, las siguientes
-entran por la lupa, y cada una llega al producto correcto (mismo
-código pedido, no el de al lado) — prestar especial atención si alguna
-de esas filas tiene un código que no aparece "arriba de todo" en la
-lista del proveedor.
+**Confirmado funcionando contra Tourplan real (2026-09-25)** — la
+usuaria corrió el mismo lote de filas antes y después de esta
+optimización: **5 min → 3 min (~40% menos tiempo)**, sin errores. Las
+tres capas (atajo dentro de una fila, encadenamiento entre filas del
+mismo proveedor con distinto LOCATION/SERVICE TYPE, y el escrolleo
+dentro del popover de la lupa) quedan validadas en uso real.
 
 ## URL de Tourplan — producción por default, editable
 
@@ -1283,16 +1274,10 @@ correctamente.
       también encadenan. Se agregó además un escrolleo dentro del
       popover de la lupa por si el proveedor tiene muchos resultados
       (ver sección arriba).
-- [ ] Validar contra Tourplan real las tres capas del atajo de la lupa
-      en Extracción de Vigencias (ver sección arriba) — implementado a
-      partir de lo que describió la usuaria, ninguna corrida todavía.
-      Punto más incierto: si el popover de la lupa realmente soporta
-      escrollear para proveedores con muchos resultados. Probar con 2+
-      filas PENDIENTE del mismo SUPPLIER pero **distinto**
-      LOCATION/SERVICE TYPE (cada una con su propio CODIGO) y confirmar
-      que cada una llega al código correcto, no al de al lado —
-      especialmente una cuyo código no esté "arriba de todo" en la
-      lista del proveedor.
+- [x] Validar contra Tourplan real las tres capas del atajo de la lupa
+      en Extracción de Vigencias (ver sección arriba) — confirmado por
+      la usuaria (2026-09-25): mismo lote de filas, 5 min → 3 min
+      (~40% menos tiempo), sin errores.
 - [ ] Evaluar portar el mismo atajo de la lupa (dentro de fila y/o entre
       filas del mismo proveedor) a Valorización desde Excel (el caso
       original grabado) y a los demás scripts que no agrupan hoy por
