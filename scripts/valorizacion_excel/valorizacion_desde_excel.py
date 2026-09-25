@@ -458,6 +458,263 @@ def fmt_tp(dt):
 class ProductoNoEncontrado(Exception):
     pass
 
+def _en_contexto_producto(driver):
+    """Confirma que el driver quedó parado en un producto (menú con
+    RATES/UTILITIES/etc.), abriendo y volviendo a cerrar el menú
+    hamburguesa. Extraída de buscar_producto() para poder reusarla desde
+    el atajo de navegación _saltar_a_producto_via_lupa()."""
+    try:
+        img = WebDriverWait(driver, 4).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "nav img")))
+        driver.execute_script("arguments[0].click();", img)
+        time.sleep(2 * VELOCIDAD)
+        items = driver.execute_script("""
+            return Array.from(document.querySelectorAll('nav ul > li')).map(function(li){
+                return (li.querySelector('div div')||li).innerText.trim().split('\\n')[0].toUpperCase();
+            });
+        """) or []
+        print(f"    Menu: {items}")
+        PROD_ITEMS = {'UTILITIES', 'RATES', 'SEASONALITY', 'OPERATION', 'CONTENT', 'PRODUCT DETAILS'}
+        ok = bool(set(items) & PROD_ITEMS)
+        driver.execute_script("arguments[0].click();", img)
+        time.sleep(1)
+        return ok, items
+    except Exception:
+        return False, []
+
+
+def _saltar_a_producto_via_lupa(driver, codigo, service_type=None):
+    """Atajo de navegación: si el driver ya está en #/product con un
+    producto abierto de una búsqueda anterior (sin pasar por #/home de
+    por medio), clickear la lupa reabre un popover con la MISMA lista de
+    resultados de esa búsqueda, en vez del modal completo de Product
+    Search — evita repetir Location/Supplier/Service Type y el reset de
+    página que hace buscar_producto() en cada código. Mismo mecanismo ya
+    confirmado en Extracción de Vigencias (ver README, "Optimización de
+    navegación — Extracción de Vigencias").
+
+    La primera fila del popover es SIEMPRE el producto en el que ya se
+    está parado (no una opción real de la lista) — se descarta siempre.
+    Si se da service_type, exige que la fila matchee código Y service
+    type (igual que el matchRow de buscar_producto) — necesario acá
+    porque el grupo se arma por SUPPLIER solo, así que el popover puede
+    traer varios service types mezclados.
+
+    Devuelve True si encontró el código pedido, lo clickeó y confirmó
+    contexto de producto. Devuelve False ante cualquier duda — el
+    llamador debe recurrir a buscar_producto(), que resetea de cero."""
+    try:
+        lupa = wait(driver, "#searchWrapper li:nth-of-type(2) button", t=4)
+        jc(driver, lupa)
+        time.sleep(2 * VELOCIDAD)
+    except Exception:
+        return False
+
+    cod_upper = (codigo or "").strip().upper()
+    st_upper = (service_type or "").strip().upper()
+
+    def _click_si_esta():
+        return driver.execute_script("""
+            var cod = arguments[0];
+            var st  = arguments[1];
+            var dialogs = document.querySelectorAll('tp-dialog');
+            if (!dialogs.length) return null;
+            var dlg = dialogs.length > 1 ? dialogs[1] : dialogs[0];
+            var rows = Array.from(dlg.querySelectorAll('tr')).slice(1);
+            for (var tr of rows){
+                var tds = Array.from(tr.querySelectorAll('td'));
+                var hasCod = tds.some(function(td){
+                    return td.children.length===0 && td.innerText.trim().toUpperCase()===cod;
+                });
+                if (!hasCod) continue;
+                if (st){
+                    var hasSt = tds.some(function(td){
+                        return td.children.length===0 && td.innerText.trim().toUpperCase()===st;
+                    });
+                    if (!hasSt) continue;
+                }
+                var target = tds.length > 4 ? tds[4] : (tds.length > 0 ? tds[tds.length-1] : tr);
+                target.click();
+                return target.innerText.trim().slice(0,50) || 'clicked';
+            }
+            return null;
+        """, cod_upper, st_upper)
+
+    def _scroll_popover():
+        return bool(driver.execute_script("""
+            var dialogs = document.querySelectorAll('tp-dialog');
+            if (!dialogs.length) return false;
+            var dlg = dialogs.length > 1 ? dialogs[1] : dialogs[0];
+            var fila = dlg.querySelector('tr');
+            if (!fila) return false;
+            var cur = fila.closest('table');
+            while (cur && cur !== dlg){
+                if (cur.scrollHeight > cur.clientHeight + 5){
+                    var antes = cur.scrollTop;
+                    cur.scrollTop = cur.scrollTop + cur.clientHeight;
+                    return cur.scrollTop > antes;
+                }
+                cur = cur.parentElement;
+            }
+            return false;
+        """))
+
+    clicked = _click_si_esta()
+    intentos = 0
+    while not clicked and intentos < 40:
+        if not _scroll_popover():
+            break
+        time.sleep(0.4 * VELOCIDAD)
+        clicked = _click_si_esta()
+        intentos += 1
+
+    if not clicked:
+        return False
+
+    time.sleep(6 * VELOCIDAD)
+    ok_ctx, _ = _en_contexto_producto(driver)
+    return ok_ctx
+
+
+def _abrir_primero_de_grupo(driver, supplier, codigo, service_type=None):
+    """Abre el primer código de un grupo de 2+ filas del mismo SUPPLIER
+    (ver _agrupar_por_busqueda): busca SOLO por proveedor — sin
+    LOCATION, sin el código en el filtro — deja la lista más amplia
+    posible de resultados de ese proveedor en pantalla (todos los
+    locations/service types que tenga) y clickea la fila que matchea
+    código + service type (si se dio).
+
+    Escrollea de a poco buscando la fila en cada paso (grilla virtual
+    sin paginación, mismo patrón progresivo ya usado en Extracción de
+    Vigencias) — nunca asume que ya escrolleó lo suficiente ni cachea
+    filas por índice."""
+    codigo = str(codigo).strip() if codigo not in (None, "") else ""
+    supplier = str(supplier).strip() if supplier not in (None, "") else ""
+    st_upper = (service_type or "").strip().upper()
+    print(f"\n  📦 Buscando (grupo, solo por proveedor): {supplier} → {codigo}"
+          f"{('/' + st_upper) if st_upper else ''}")
+
+    driver.get(f"{BASE_URL}/#/home")
+    time.sleep(2 * VELOCIDAD)
+    driver.get(f"{BASE_URL}/#/product")
+    time.sleep(5 * VELOCIDAD)
+
+    lupa = wait(driver, "#searchWrapper li:nth-of-type(2) button")
+    jc(driver, lupa)
+    time.sleep(3 * VELOCIDAD)
+
+    try:
+        WebDriverWait(driver, 4).until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "div.parameters1 input")))
+    except Exception:
+        driver.execute_script("""
+            var els = Array.from(document.querySelectorAll('li,button,a,div,span'));
+            for (var el of els){
+                if (!el.offsetParent) continue;
+                var t = (el.innerText || '').trim().toUpperCase();
+                if (t === 'SELECTION'){ el.click(); return true; }
+            }
+            return false;
+        """)
+        time.sleep(2 * VELOCIDAD)
+
+    try:
+        inp_sup = wait(driver, "div.parameters1 li:nth-of-type(2) input")
+        inp_sup.click(); time.sleep(0.3)
+        set_val(driver, inp_sup, supplier)
+        time.sleep(1.5)
+        try:
+            row_sup = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located(
+                    (By.XPATH,
+                     f"//div[contains(@class,'parameters1')]//td[normalize-space(text())='{supplier.upper()}']")))
+            jc(driver, row_sup); time.sleep(1)
+        except Exception:
+            try:
+                inp_sup2 = driver.find_element(By.CSS_SELECTOR,
+                    "div.parameters1 li:nth-of-type(2) input")
+                inp_sup2.send_keys(Keys.TAB); time.sleep(1)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    btn_search = wait(driver, "#productSearchFilter li:nth-of-type(4) button")
+    jc(driver, btn_search)
+    time.sleep(6 * VELOCIDAD)
+
+    cod_upper = codigo.upper()
+
+    def _click_si_esta():
+        return driver.execute_script("""
+            var cod = arguments[0];
+            var st  = arguments[1];
+            var rows = Array.from(document.querySelectorAll('table tbody tr'));
+            for (var tr of rows){
+                var tds = Array.from(tr.querySelectorAll('td'));
+                var hasCod = tds.some(function(td){
+                    return td.children.length===0 && td.innerText.trim().toUpperCase()===cod;
+                });
+                if (!hasCod) continue;
+                if (st){
+                    var hasSt = tds.some(function(td){
+                        return td.children.length===0 && td.innerText.trim().toUpperCase()===st;
+                    });
+                    if (!hasSt) continue;
+                }
+                var target = tds.length > 4 ? tds[4] : (tds.length > 0 ? tds[tds.length-1] : tr);
+                target.click();
+                return target.innerText.trim().slice(0,50) || 'clicked';
+            }
+            return null;
+        """, cod_upper, st_upper)
+
+    clicked = _click_si_esta()
+    intentos = 0
+    while not clicked and intentos < 40:
+        if not _hacer_scroll_resultados(driver):
+            break
+        time.sleep(0.4 * VELOCIDAD)
+        clicked = _click_si_esta()
+        intentos += 1
+
+    if not clicked:
+        ss(driver, f"ps_grupo_sin_resultado_{(codigo or 'sin_codigo')[:10]}")
+        raise ProductoNoEncontrado(
+            f"Producto no encontrado en la lista del grupo (supplier={supplier!r} "
+            f"codigo={codigo!r} service_type={service_type!r})")
+
+    time.sleep(6 * VELOCIDAD)
+    ok_ctx, menu_items = _en_contexto_producto(driver)
+    if not ok_ctx:
+        ss(driver, f"ps_grupo_contexto_incorrecto_{(codigo or 'sin_codigo')[:10]}")
+        raise ProductoNoEncontrado(
+            f"Click en resultado OK pero no quedó en contexto de producto "
+            f"(menú visto: {menu_items}) — codigo={codigo!r}")
+
+
+def _hacer_scroll_resultados(driver):
+    """Escrollea la grilla virtual de resultados de Product Search un
+    paso (misma lógica ya confirmada en Extracción de Vigencias)."""
+    return bool(driver.execute_script("""
+        function contenedorScroll(){
+            var fila = document.querySelector('table tbody tr');
+            if (!fila) return null;
+            var cur = fila.closest('table');
+            while (cur && cur !== document.body){
+                if (cur.scrollHeight > cur.clientHeight + 5) return cur;
+                cur = cur.parentElement;
+            }
+            return document.scrollingElement || document.body;
+        }
+        var c = contenedorScroll();
+        if (!c) return false;
+        var antes = c.scrollTop;
+        c.scrollTop = c.scrollTop + c.clientHeight;
+        return c.scrollTop > antes;
+    """))
+
+
 def buscar_producto(driver, location, supplier, codigo, service_type=None, handle_origen=None):
     """
     Abre un producto/option específico en Product Setup.
@@ -615,26 +872,6 @@ def buscar_producto(driver, location, supplier, codigo, service_type=None, handl
     time.sleep(6 * VELOCIDAD)
     ss(driver, f"ps_resultados_{codigo[:10]}")
 
-    def _en_contexto_producto():
-        try:
-            img = WebDriverWait(driver, 4).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "nav img")))
-            driver.execute_script("arguments[0].click();", img)
-            time.sleep(2 * VELOCIDAD)
-            items = driver.execute_script("""
-                return Array.from(document.querySelectorAll('nav ul > li')).map(function(li){
-                    return (li.querySelector('div div')||li).innerText.trim().split('\\n')[0].toUpperCase();
-                });
-            """) or []
-            print(f"    Menu: {items}")
-            PROD_ITEMS = {'UTILITIES','RATES','SEASONALITY','OPERATION','CONTENT','PRODUCT DETAILS'}
-            ok = bool(set(items) & PROD_ITEMS)
-            driver.execute_script("arguments[0].click();", img)
-            time.sleep(1)
-            return ok, items
-        except Exception:
-            return False, []
-
     clicked = driver.execute_script(f"""
         var cod = '{codigo}'.toUpperCase();
         var st  = '{st_upper}';
@@ -670,7 +907,7 @@ def buscar_producto(driver, location, supplier, codigo, service_type=None, handl
     if clicked:
         time.sleep(6 * VELOCIDAD)
         ss(driver, f"ps_cargado_{codigo[:10]}")
-        ok_ctx, menu_items = _en_contexto_producto()
+        ok_ctx, menu_items = _en_contexto_producto(driver)
         if ok_ctx:
             print(f"  ✅ Producto {codigo} en contexto correcto (menú: {menu_items})")
             return
@@ -1240,7 +1477,8 @@ def _escribir_valor_unico(driver, valor, cod):
 
 
 def cargar_tarifa_option(driver, service_code, supplier, location, service_type,
-                          rate_from_str, rate_to_str, price_code, valor, modo="aplicar"):
+                          rate_from_str, rate_to_str, price_code, valor, modo="aplicar",
+                          continuar_grupo=False, primero_de_grupo_multiple=False):
     """
     Busca un option (location+supplier+service_type+code), entra a RATES,
     ubica el período por rango de fechas + price code (o lo crea copiando
@@ -1250,11 +1488,27 @@ def cargar_tarifa_option(driver, service_code, supplier, location, service_type,
     modo="lectura": no escribe nada — solo reporta si el período existe y
     cuál es el valor actual.
     Devuelve un dict con el detalle del resultado (para el Excel).
-    """
+
+    continuar_grupo / primero_de_grupo_multiple: encadenamiento entre
+    FILAS del mismo SUPPLIER (ver _agrupar_por_busqueda(), llamado desde
+    main()) — mismo mecanismo ya confirmado en Extracción de Vigencias.
+    continuar_grupo=True: el driver ya está parado en un producto
+    abierto por la fila anterior del mismo grupo — se prueba el atajo
+    de la lupa antes que buscar_producto(). primero_de_grupo_multiple=True:
+    primera fila de un grupo con más filas después — se abre con
+    _abrir_primero_de_grupo() (búsqueda solo por proveedor) para que las
+    filas siguientes tengan su código disponible en el popover de la
+    lupa."""
     print(f"\n📦 {service_code}  {location or '—'}/{supplier}/{service_type}  "
           f"período {rate_from_str}–{rate_to_str}  PC={price_code or PRICE_CODE_DEFAULT}  valor={valor}")
 
-    buscar_producto(driver, location, supplier, service_code, service_type=service_type)
+    saltado = continuar_grupo and _saltar_a_producto_via_lupa(driver, service_code, service_type=service_type)
+    if saltado:
+        pass
+    elif primero_de_grupo_multiple:
+        _abrir_primero_de_grupo(driver, supplier, service_code, service_type=service_type)
+    else:
+        buscar_producto(driver, location, supplier, service_code, service_type=service_type)
 
     hamburger(driver)
     menu_item(driver, "RATES")
@@ -1409,6 +1663,34 @@ def escribir_resultado(row_idx, estado, observaciones=""):
     })
 
 
+def _clave_busqueda(row):
+    """Identidad de búsqueda de una fila: mismo SUPPLIER → misma lupa de
+    búsqueda en Product Search, aunque LOCATION/SERVICE TYPE difieran
+    entre filas (mismo criterio ya confirmado en Extracción de
+    Vigencias). Usada para encadenar filas del mismo proveedor y reusar
+    el atajo de la lupa entre ellas (ver _agrupar_por_busqueda)."""
+    return (str(row.get("SUPPLIER") or "").strip().upper(),)
+
+
+def _agrupar_por_busqueda(pendientes):
+    """Agrupa las filas PENDIENTE que comparten SUPPLIER (mismo
+    proveedor, sin importar si LOCATION/SERVICE TYPE difieren —
+    típicamente una fila por SERVICE CODE), preservando el orden
+    relativo dentro de cada grupo y el orden de aparición de los
+    grupos. Mismo patrón que _agrupar_por_busqueda() en
+    extraccion_vigencias.py / _agrupar_por_origen() en
+    copy_products.py."""
+    grupos = {}
+    orden = []
+    for row in pendientes:
+        clave = _clave_busqueda(row)
+        if clave not in grupos:
+            grupos[clave] = []
+            orden.append(clave)
+        grupos[clave].append(row)
+    return [grupos[clave] for clave in orden]
+
+
 # ── MAIN ──────────────────────────────────────────────────────
 def main():
     print("=" * 60)
@@ -1429,49 +1711,58 @@ def main():
     try:
         login(driver)
 
-        for fila in pendientes:
-            chequear_abort()
-            row_idx = fila["__row_idx__"]
-            print(f"\n{'─' * 60}")
-            print(f"Fila {row_idx}: {fila.get('SERVICE CODE')}")
+        grupos = _agrupar_por_busqueda(pendientes)
+        for grupo in grupos:
+            clave = _clave_busqueda(grupo[0])
+            # Solo se encadena cuando SUPPLIER vino completo — un match
+            # coincidente con SUPPLIER vacío no es garantía de que sean
+            # el mismo proveedor.
+            grupo_multiple = len(grupo) > 1 and all(clave)
+            for idx_en_grupo, fila in enumerate(grupo):
+                chequear_abort()
+                row_idx = fila["__row_idx__"]
+                print(f"\n{'─' * 60}")
+                print(f"Fila {row_idx}: {fila.get('SERVICE CODE')}")
 
-            marcar_procesando(row_idx)
+                marcar_procesando(row_idx)
 
-            try:
-                valor = _try_float(fila.get("VALOR"))
-                if valor is None:
-                    raise Exception("Columna VALOR vacía o no numérica")
+                try:
+                    valor = _try_float(fila.get("VALOR"))
+                    if valor is None:
+                        raise Exception("Columna VALOR vacía o no numérica")
 
-                resultado = cargar_tarifa_option(
-                    driver,
-                    service_code=str(fila.get("SERVICE CODE") or "").strip(),
-                    supplier=str(fila.get("SUPPLIER") or "").strip(),
-                    location=str(fila.get("LOCATION") or "").strip(),
-                    service_type=str(fila.get("SERVICE TYPE") or "").strip(),
-                    rate_from_str=str(fila.get("RATE FROM") or "").strip(),
-                    rate_to_str=str(fila.get("RATE TO") or "").strip(),
-                    price_code=str(fila.get("PRICE CODE") or "").strip(),
-                    valor=valor,
-                    modo=MODO,
-                )
+                    resultado = cargar_tarifa_option(
+                        driver,
+                        service_code=str(fila.get("SERVICE CODE") or "").strip(),
+                        supplier=str(fila.get("SUPPLIER") or "").strip(),
+                        location=str(fila.get("LOCATION") or "").strip(),
+                        service_type=str(fila.get("SERVICE TYPE") or "").strip(),
+                        rate_from_str=str(fila.get("RATE FROM") or "").strip(),
+                        rate_to_str=str(fila.get("RATE TO") or "").strip(),
+                        price_code=str(fila.get("PRICE CODE") or "").strip(),
+                        valor=valor,
+                        modo=MODO,
+                        continuar_grupo=grupo_multiple and idx_en_grupo > 0,
+                        primero_de_grupo_multiple=grupo_multiple and idx_en_grupo == 0,
+                    )
 
-                if MODO == "lectura":
-                    if resultado["periodo_existia"]:
-                        obs = (f"Período existente. Valor actual en '{resultado['etiqueta_fila']}': "
-                               f"{resultado['valor_actual']} → se cargaría {valor}")
+                    if MODO == "lectura":
+                        if resultado["periodo_existia"]:
+                            obs = (f"Período existente. Valor actual en '{resultado['etiqueta_fila']}': "
+                                   f"{resultado['valor_actual']} → se cargaría {valor}")
+                        else:
+                            obs = "El período NO existe: se crearía copiando el último período existente"
+                        escribir_resultado(row_idx, "OK", obs)
                     else:
-                        obs = "El período NO existe: se crearía copiando el último período existente"
-                    escribir_resultado(row_idx, "OK", obs)
-                else:
-                    obs = f"'{resultado['etiqueta_fila']}': {resultado['valor_viejo']} → {resultado['valor_nuevo']}"
-                    if resultado.get("pc_warning"):
-                        obs += f" | ⚠ {resultado['pc_warning']}"
-                    escribir_resultado(row_idx, "OK", obs)
-                print(f"  ✅ {obs}")
+                        obs = f"'{resultado['etiqueta_fila']}': {resultado['valor_viejo']} → {resultado['valor_nuevo']}"
+                        if resultado.get("pc_warning"):
+                            obs += f" | ⚠ {resultado['pc_warning']}"
+                        escribir_resultado(row_idx, "OK", obs)
+                    print(f"  ✅ {obs}")
 
-            except Exception as e:
-                print(f"  ❌ ERROR: {e}")
-                escribir_resultado(row_idx, f"ERROR: {str(e)[:280]}", "")
+                except Exception as e:
+                    print(f"  ❌ ERROR: {e}")
+                    escribir_resultado(row_idx, f"ERROR: {str(e)[:280]}", "")
 
     except AbortadoPorUsuario:
         _abortado = True

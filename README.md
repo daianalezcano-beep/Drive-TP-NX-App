@@ -415,6 +415,44 @@ tres capas (atajo dentro de una fila, encadenamiento entre filas del
 mismo proveedor con distinto LOCATION/SERVICE TYPE, y el escrolleo
 dentro del popover de la lupa) quedan validadas en uso real.
 
+## Optimización de navegación (Valorización desde Excel) — atajo de la lupa
+
+Portado el mismo mecanismo confirmado en Extracción de Vigencias (ver
+sección arriba) — es el script que originalmente motivó la idea (la
+usuaria lo grabó primero acá). `buscar_producto()` en este script tiene
+prácticamente la misma estructura que el de Vigencias (mismo selector
+de lupa `#searchWrapper li:nth-of-type(2) button`, mismo reset
+`driver.get(#/home)` → `driver.get(#/product)` por fila), así que el
+port fue directo:
+
+- `_en_contexto_producto()` extraída de `buscar_producto()` a nivel de
+  módulo (mismo comportamiento, ahora reusable).
+- `_saltar_a_producto_via_lupa(driver, codigo, service_type=None)`:
+  mismo atajo — clickea la lupa, busca en el popover la fila que
+  matchea el código exacto, descartando siempre la primera fila. A
+  diferencia de Vigencias, acá también exige que matchee `service_type`
+  cuando se da (igual que el `matchRow` original de `buscar_producto()`
+  de este script, que ya lo hacía — se preserva esa verificación extra
+  porque el grupo se arma por SUPPLIER solo y puede traer varios
+  service types mezclados). Escrollea dentro del popover si hace falta.
+- `_agrupar_por_busqueda()` / `_clave_busqueda()`: agrupan las filas
+  PENDIENTE por SUPPLIER (igual que en Vigencias).
+- `_abrir_primero_de_grupo()`: abre la primera fila de un grupo de 2+
+  buscando solo por proveedor (sin LOCATION, sin código en el filtro),
+  clickeando la fila que matchea código + service type. Escrollea de a
+  poco (reusa `_hacer_scroll_resultados`, agregada a este script con la
+  misma lógica de Vigencias).
+- `cargar_tarifa_option()` recibe `continuar_grupo`/
+  `primero_de_grupo_multiple` desde `main()`, con el mismo fallback
+  automático a `buscar_producto()` si el atajo no encuentra el código.
+
+**Sin correr todavía contra Tourplan real** — portado por analogía
+directa con Vigencias (ya confirmado ahí, 5 min → 3 min en el mismo
+tipo de lote), pero este script en sí no se probó con el atajo activo.
+Probar con 2+ filas PENDIENTE del mismo SUPPLIER (mismo o distinto
+LOCATION/SERVICE TYPE) y confirmar que cada una llega al código y
+service type correctos, no al de al lado.
+
 ## URL de Tourplan — producción por default, editable
 
 El campo de URL viene precargado con `https://tourplannx.eurotur.com.ar/tourplannx`
@@ -1278,12 +1316,24 @@ correctamente.
       en Extracción de Vigencias (ver sección arriba) — confirmado por
       la usuaria (2026-09-25): mismo lote de filas, 5 min → 3 min
       (~40% menos tiempo), sin errores.
-- [ ] Evaluar portar el mismo atajo de la lupa (dentro de fila y/o entre
-      filas del mismo proveedor) a Valorización desde Excel (el caso
-      original grabado) y a los demás scripts que no agrupan hoy por
-      producto/servicio madre (Flag as Deleted, Modificar Description y
-      Comment, Copy y Linkeo PCM) — recién después de validar el de
-      Vigencias contra Tourplan real.
+- [x] Portar el atajo de la lupa (encadenamiento dentro de fila y entre
+      filas del mismo proveedor) a **Valorización desde Excel** — el
+      caso original grabado por la usuaria. Ver sección "Optimización de
+      navegación (Valorización desde Excel)" arriba.
+- [ ] Validar contra Tourplan real el atajo de la lupa en Valorización
+      desde Excel — portado por analogía directa con Vigencias (ya
+      confirmado ahí), pero sin correr todavía en este script. Probar
+      con 2+ filas PENDIENTE del mismo SUPPLIER.
+- [ ] Evaluar portar el mismo atajo de la lupa a los demás scripts que
+      no agrupan hoy por producto/servicio madre (Flag as Deleted,
+      Modificar Description y Comment, Copy y Linkeo PCM) — recién
+      después de validar el de Valorización desde Excel contra Tourplan
+      real. Flag as Deleted necesita más trabajo que los otros dos: no
+      usa la misma arquitectura de búsqueda (`_completar_filtros_busqueda`)
+      que Vigencias/Valorización desde Excel — tiene sus propias
+      funciones paso a paso (`reset_search`, `select_location`,
+      `select_supplier`, etc.), así que el atajo habría que adaptarlo,
+      no portarlo tal cual.
 
 ## Estructura
 
