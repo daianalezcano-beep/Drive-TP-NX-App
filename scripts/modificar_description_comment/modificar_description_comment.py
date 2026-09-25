@@ -758,6 +758,186 @@ def abrir_option(driver, opt):
     time.sleep(2 * VELOCIDAD)
     ss(driver, f"option_abierto_{opt['code'][:10]}")
 
+
+# ── Atajo de navegación por proveedor (mismo mecanismo confirmado en ──
+# Extracción de Vigencias / Valorización desde Excel, ver README) ─────
+
+def _hacer_scroll_resultados(driver):
+    """Escrollea la grilla virtual de resultados de Product Search un
+    paso (misma lógica ya confirmada en Extracción de Vigencias /
+    Valorización desde Excel)."""
+    return bool(driver.execute_script("""
+        function contenedorScroll(){
+            var fila = document.querySelector('table tbody tr');
+            if (!fila) return null;
+            var cur = fila.closest('table');
+            while (cur && cur !== document.body){
+                if (cur.scrollHeight > cur.clientHeight + 5) return cur;
+                cur = cur.parentElement;
+            }
+            return document.scrollingElement || document.body;
+        }
+        var c = contenedorScroll();
+        if (!c) return false;
+        var antes = c.scrollTop;
+        c.scrollTop = c.scrollTop + c.clientHeight;
+        return c.scrollTop > antes;
+    """))
+
+
+def _saltar_a_producto_via_lupa(driver, codigo):
+    """Atajo de navegación: si el driver ya está en #/product (grilla de
+    resultados o un option abierto) de una búsqueda anterior, sin pasar
+    por #/home de por medio, clickear la lupa (SEL["SEARCH_BTN"]) reabre
+    un popover con la MISMA lista de resultados de esa búsqueda, en vez
+    del modal completo de Product Search — evita repetir el reset de
+    página + los filtros que hace search_options() en cada fila.
+
+    La primera fila del popover es SIEMPRE el producto en el que ya se
+    está parado (no una opción real de la lista) — se descarta siempre.
+    No verifica service_type (tampoco lo hace process_row() al elegir
+    entre los resultados de search_options() — el código ya identifica
+    el option exacto).
+
+    Devuelve True si encontró el código pedido, lo clickeó y (si hacía
+    falta) escrolleó para encontrarlo. Devuelve False ante cualquier
+    duda — el llamador debe recurrir a search_options(), que resetea la
+    página de cero."""
+    try:
+        lupa = wait_click(driver, SEL["SEARCH_BTN"], t=WAIT_SHORT)
+        jc(driver, lupa)
+        time.sleep(2 * VELOCIDAD)
+    except Exception:
+        return False
+
+    cod_upper = (codigo or "").strip().upper()
+
+    def _click_si_esta():
+        return driver.execute_script("""
+            var cod = arguments[0];
+            var dialogs = document.querySelectorAll('tp-dialog');
+            if (!dialogs.length) return null;
+            var dlg = dialogs.length > 1 ? dialogs[1] : dialogs[0];
+            var rows = Array.from(dlg.querySelectorAll('tr')).slice(1);
+            for (var tr of rows){
+                var celda = tr.querySelector('td.tpcol-optioncode');
+                if (celda && celda.innerText.trim().toUpperCase() === cod){
+                    celda.click();
+                    return celda.innerText.trim();
+                }
+            }
+            return null;
+        """, cod_upper)
+
+    def _scroll_popover():
+        return bool(driver.execute_script("""
+            var dialogs = document.querySelectorAll('tp-dialog');
+            if (!dialogs.length) return false;
+            var dlg = dialogs.length > 1 ? dialogs[1] : dialogs[0];
+            var fila = dlg.querySelector('tr');
+            if (!fila) return false;
+            var cur = fila.closest('table');
+            while (cur && cur !== dlg){
+                if (cur.scrollHeight > cur.clientHeight + 5){
+                    var antes = cur.scrollTop;
+                    cur.scrollTop = cur.scrollTop + cur.clientHeight;
+                    return cur.scrollTop > antes;
+                }
+                cur = cur.parentElement;
+            }
+            return false;
+        """))
+
+    clicked = _click_si_esta()
+    intentos = 0
+    while not clicked and intentos < 40:
+        if not _scroll_popover():
+            break
+        time.sleep(0.4 * VELOCIDAD)
+        clicked = _click_si_esta()
+        intentos += 1
+
+    if not clicked:
+        return False
+
+    time.sleep(2 * VELOCIDAD)
+    ss(driver, f"lupa_salto_{codigo[:10]}")
+    return True
+
+
+def _abrir_primero_de_grupo(driver, supplier, codigo):
+    """Abre el primer código de un grupo de 2+ filas del mismo SUPPLIER
+    (ver _agrupar_por_busqueda): busca SOLO por proveedor — sin
+    LOCATION, sin SERVICE TYPE, sin el código en el filtro — para dejar
+    la lista más amplia posible de resultados de ese proveedor en
+    pantalla, y clickea la fila que matchea el código pedido.
+
+    A diferencia de search_options(), que no escrollea (siempre se usó
+    con filtros que acotan a pocos resultados), acá el resultado puede
+    ser mucho más amplio — escrollea de a poco buscando la fila en cada
+    paso (grilla virtual sin paginación, mismo patrón progresivo ya
+    usado en Extracción de Vigencias) antes de rendirse.
+
+    Devuelve True si encontró y clickeó el código pedido. Devuelve
+    False ante cualquier duda — el llamador debe recurrir a
+    search_options()."""
+    codigo = str(codigo).strip() if codigo not in (None, "") else ""
+    supplier = str(supplier).strip() if supplier not in (None, "") else ""
+    print(f"\n  🔍 Buscando (grupo, solo por proveedor): supplier={supplier} → {codigo}")
+
+    try:
+        driver.get(f"{APP_BASE_URL}/#/home")
+        time.sleep(2 * VELOCIDAD)
+        driver.get(f"{APP_BASE_URL}/#/product")
+        time.sleep(5 * VELOCIDAD)
+        esperar_fin_carga(driver)
+
+        wait_click(driver, SEL["SEARCH_BTN"]).click()
+        time.sleep(1 * VELOCIDAD)
+
+        sup_inp = wait(driver, SEL["FIELD_SUPPLIER"])
+        select_from_dropdown(driver, sup_inp, supplier)
+        time.sleep(0.5 * VELOCIDAD)
+
+        tab = wait_click(driver, SEL["TAB_RESULTS"])
+        jc(driver, tab)
+        time.sleep(2 * VELOCIDAD)
+    except Exception:
+        return False
+
+    cod_upper = codigo.upper()
+
+    def _click_si_esta():
+        return driver.execute_script("""
+            var cod = arguments[0];
+            var celdas = Array.from(document.querySelectorAll('td.tpcol-optioncode'));
+            for (var celda of celdas){
+                if (celda.innerText.trim().toUpperCase() === cod){
+                    celda.click();
+                    return celda.innerText.trim();
+                }
+            }
+            return null;
+        """, cod_upper)
+
+    clicked = _click_si_esta()
+    intentos = 0
+    while not clicked and intentos < 40:
+        if not _hacer_scroll_resultados(driver):
+            break
+        time.sleep(0.4 * VELOCIDAD)
+        clicked = _click_si_esta()
+        intentos += 1
+
+    if not clicked:
+        ss(driver, f"ps_grupo_sin_resultado_{(codigo or 'sin_codigo')[:10]}")
+        return False
+
+    time.sleep(2 * VELOCIDAD)
+    ss(driver, f"ps_grupo_cargado_{codigo[:10]}")
+    return True
+
+
 # ── Option Description / Option Comment ─────────────────────────
 # Ambos campos viven en el mismo formulario (tab Product Details) y se
 # manejan con el mismo patrón — foco → setter nativo → eventos → blur →
@@ -917,6 +1097,35 @@ def update_row(ws, row_idx, columnas, estado=None, observaciones=None):
         valores[COL_OBSERVACIONES] = observaciones
     actualizar_fila_sheet(ws, row_idx, columnas, valores)
 
+
+def _clave_busqueda(row):
+    """Identidad de búsqueda de una fila: mismo SUPPLIER → misma lupa de
+    búsqueda en Product Search, aunque LOCATION/SERVICE TYPE difieran
+    entre filas (mismo criterio ya confirmado en Extracción de
+    Vigencias / Valorización desde Excel). Usada para encadenar filas
+    del mismo proveedor y reusar el atajo de la lupa entre ellas (ver
+    _agrupar_por_busqueda)."""
+    return (str(row.get(COL_SUPPLIER) or "").strip().upper(),)
+
+
+def _agrupar_por_busqueda(pendientes):
+    """Agrupa las filas PENDIENTE que comparten SUPPLIER (mismo
+    proveedor, sin importar si LOCATION/SERVICE TYPE difieren —
+    típicamente una fila por PRODUCT_CODE), preservando el orden
+    relativo dentro de cada grupo y el orden de aparición de los
+    grupos. Mismo patrón que _agrupar_por_busqueda() en
+    extraccion_vigencias.py / valorizacion_desde_excel.py."""
+    grupos = {}
+    orden = []
+    for row in pendientes:
+        clave = _clave_busqueda(row)
+        if clave not in grupos:
+            grupos[clave] = []
+            orden.append(clave)
+        grupos[clave].append(row)
+    return [grupos[clave] for clave in orden]
+
+
 # Campos editables — nombre visible, columna del Excel, lector y editor.
 # Agregar un campo nuevo (ej. otro input del mismo tab) es sumar una
 # entrada acá; process_row() no necesita tocarse.
@@ -926,7 +1135,7 @@ CAMPOS_EDITABLES = [
 ]
 
 # ── Lógica de negocio por fila ────────────────────────────────
-def process_row(driver, row):
+def process_row(driver, row, continuar_grupo=False, primero_de_grupo_multiple=False):
     location     = str(row.get(COL_LOCATION) or "").strip()
     supplier     = str(row.get(COL_SUPPLIER) or "").strip()
     codigo       = str(row.get(COL_PRODUCT_CODE) or "").strip()
@@ -944,26 +1153,38 @@ def process_row(driver, row):
     if not objetivos:
         return "OK", "NEW_DESCRIPTION y NEW_COMMENT vacíos — no había nada para actualizar"
 
-    try:
-        options = search_options(driver, supplier, service_type, location, codigo)
-    except Exception as e:
-        ss(driver, f"search_error_{codigo}")
-        return "ERROR", f"Falla en búsqueda: {e}"
+    # Encadenamiento entre filas del mismo SUPPLIER (ver
+    # _agrupar_por_busqueda(), llamado desde main()) — mismo mecanismo
+    # confirmado en Extracción de Vigencias / Valorización desde Excel.
+    # Si el atajo no abre nada (lupa no disponible, código no está en
+    # esa lista, etc.), cae al camino normal de abajo sin cambios.
+    abierto = False
+    if continuar_grupo:
+        abierto = _saltar_a_producto_via_lupa(driver, codigo)
+    elif primero_de_grupo_multiple:
+        abierto = _abrir_primero_de_grupo(driver, supplier, codigo)
 
-    if not options:
-        return "ERROR", f"No se encontró ningún option con los filtros dados (supplier={supplier}, code={codigo})"
+    if not abierto:
+        try:
+            options = search_options(driver, supplier, service_type, location, codigo)
+        except Exception as e:
+            ss(driver, f"search_error_{codigo}")
+            return "ERROR", f"Falla en búsqueda: {e}"
 
-    opt = next((o for o in options if o["code"].upper() == codigo.upper()), None)
-    if opt is None:
-        dump(driver, f"sin_match_{codigo}")
-        return "ERROR", f"'{codigo}' no está entre los resultados: {[o['code'] for o in options]}"
+        if not options:
+            return "ERROR", f"No se encontró ningún option con los filtros dados (supplier={supplier}, code={codigo})"
 
-    try:
-        abrir_option(driver, opt)
-    except Exception as e:
-        ss(driver, f"abrir_option_error_{codigo}")
-        exit_to_results(driver)
-        return "ERROR", f"Error abriendo el option: {e}"
+        opt = next((o for o in options if o["code"].upper() == codigo.upper()), None)
+        if opt is None:
+            dump(driver, f"sin_match_{codigo}")
+            return "ERROR", f"'{codigo}' no está entre los resultados: {[o['code'] for o in options]}"
+
+        try:
+            abrir_option(driver, opt)
+        except Exception as e:
+            ss(driver, f"abrir_option_error_{codigo}")
+            exit_to_results(driver)
+            return "ERROR", f"Error abriendo el option: {e}"
 
     # Leer el estado actual SOLO de los campos con objetivo — no hace
     # falta tocar el campo que el Excel dejó vacío.
@@ -1085,22 +1306,33 @@ try:
     login(driver)
     open_product_setup(driver)
 
-    for row in pendientes:
-        chequear_abort()
-        row_idx = row["__row_idx__"]
-        print(f"\n{'─'*60}")
-        print(f"Fila {row_idx}: {row.get(COL_SUPPLIER)}/{row.get(COL_PRODUCT_CODE)}")
+    grupos = _agrupar_por_busqueda(pendientes)
+    for grupo in grupos:
+        clave = _clave_busqueda(grupo[0])
+        # Solo se encadena cuando SUPPLIER vino completo — un match
+        # coincidente con SUPPLIER vacío no es garantía de que sean el
+        # mismo proveedor.
+        grupo_multiple = len(grupo) > 1 and all(clave)
+        for idx_en_grupo, row in enumerate(grupo):
+            chequear_abort()
+            row_idx = row["__row_idx__"]
+            print(f"\n{'─'*60}")
+            print(f"Fila {row_idx}: {row.get(COL_SUPPLIER)}/{row.get(COL_PRODUCT_CODE)}")
 
-        estado, observaciones = "ERROR", "Error desconocido"
-        try:
-            estado, observaciones = process_row(driver, row)
-        except Exception:
-            estado = "ERROR"
-            observaciones = traceback.format_exc(limit=3)
-            ss(driver, f"fatal_row{row_idx}")
+            estado, observaciones = "ERROR", "Error desconocido"
+            try:
+                estado, observaciones = process_row(
+                    driver, row,
+                    continuar_grupo=grupo_multiple and idx_en_grupo > 0,
+                    primero_de_grupo_multiple=grupo_multiple and idx_en_grupo == 0,
+                )
+            except Exception:
+                estado = "ERROR"
+                observaciones = traceback.format_exc(limit=3)
+                ss(driver, f"fatal_row{row_idx}")
 
-        print(f"  Estado: {estado}" + (f" — {observaciones}" if observaciones else ""))
-        update_row(ws, row_idx, columnas, estado=estado, observaciones=observaciones)
+            print(f"  Estado: {estado}" + (f" — {observaciones}" if observaciones else ""))
+            update_row(ws, row_idx, columnas, estado=estado, observaciones=observaciones)
 
 except AbortadoPorUsuario:
     _abortado = True

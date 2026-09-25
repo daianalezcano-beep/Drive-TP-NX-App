@@ -453,6 +453,51 @@ Probar con 2+ filas PENDIENTE del mismo SUPPLIER (mismo o distinto
 LOCATION/SERVICE TYPE) y confirmar que cada una llega al código y
 service type correctos, no al de al lado.
 
+## Optimización de navegación (Modificar Description y Comment) — atajo de la lupa
+
+Mismo mecanismo confirmado en Extracción de Vigencias / Valorización
+desde Excel, pero portado sobre una arquitectura de búsqueda distinta:
+este script usa `search_options()`/`abrir_option()` (patrón
+`buscar_y_abrir_option()` — el "camino por defecto" de la skill
+`buscando-productos-en-tourplan`, más liviano porque nunca abre el menú
+hamburguesa), no `buscar_producto()`. El selector de la lupa
+(`SEL["SEARCH_BTN"]` = `#searchWrapper li:nth-of-type(2) button`) y el
+reset `driver.get(#/home)` → `driver.get(#/product)` por fila son los
+mismos, así que el mecanismo de fondo aplica igual — la diferencia es
+de qué funciones existentes se reusan:
+
+- `_clave_busqueda()` / `_agrupar_por_busqueda()`: agrupan las filas
+  PENDIENTE por SUPPLIER (igual que en los otros dos scripts).
+- `_saltar_a_producto_via_lupa(driver, codigo)`: mismo atajo — clickea
+  la lupa, busca en el popover la fila que matchea el código exacto
+  (`td.tpcol-optioncode`, mismo selector que usa `search_options()`
+  para leer resultados), descartando siempre la primera fila. No
+  verifica `service_type` — tampoco lo hacía `process_row()` al elegir
+  entre los resultados de `search_options()` (el código ya identifica
+  el option exacto), así que no se agregó una verificación que el
+  script no tenía.
+- `_abrir_primero_de_grupo(driver, supplier, codigo)`: abre la primera
+  fila de un grupo de 2+ buscando solo por proveedor. A diferencia de
+  `search_options()` — que nunca escrollea, porque siempre se usó con
+  filtros que acotan a pocos resultados —, acá el resultado puede ser
+  mucho más amplio: agrega escrolleo progresivo (`_hacer_scroll_resultados()`,
+  misma lógica que en Vigencias/Valorización desde Excel) antes de
+  rendirse.
+- `process_row()` recibe `continuar_grupo`/`primero_de_grupo_multiple`
+  desde el loop principal; si el atajo no abre nada, cae exactamente al
+  camino original (`search_options()` + `abrir_option()`) sin cambios —
+  ninguna de las dos funciones existentes se tocó.
+
+**Sin correr todavía contra Tourplan real** — portado por analogía, sin
+probar en este script. Punto a confirmar especialmente acá (arquitectura
+distinta a los otros dos): que la lupa siga abriendo el popover rápido
+después de `exit_to_results()` (volver a la grilla de resultados sin
+entrar a un producto puntual), no solo después de estar "dentro" de un
+producto como en los otros dos scripts — la lógica documentada dice que
+alcanza con no pasar por `#/home`, así que debería aplicar igual, pero
+no está confirmado en este flujo puntual. Probar con 2+ filas PENDIENTE
+del mismo SUPPLIER.
+
 ## URL de Tourplan — producción por default, editable
 
 El campo de URL viene precargado con `https://tourplannx.eurotur.com.ar/tourplannx`
@@ -1324,16 +1369,26 @@ correctamente.
       desde Excel — portado por analogía directa con Vigencias (ya
       confirmado ahí), pero sin correr todavía en este script. Probar
       con 2+ filas PENDIENTE del mismo SUPPLIER.
-- [ ] Evaluar portar el mismo atajo de la lupa a los demás scripts que
-      no agrupan hoy por producto/servicio madre (Flag as Deleted,
-      Modificar Description y Comment, Copy y Linkeo PCM) — recién
-      después de validar el de Valorización desde Excel contra Tourplan
-      real. Flag as Deleted necesita más trabajo que los otros dos: no
-      usa la misma arquitectura de búsqueda (`_completar_filtros_busqueda`)
-      que Vigencias/Valorización desde Excel — tiene sus propias
-      funciones paso a paso (`reset_search`, `select_location`,
-      `select_supplier`, etc.), así que el atajo habría que adaptarlo,
-      no portarlo tal cual.
+- [x] Portar el atajo de la lupa a **Modificar Description y Comment**
+      — arquitectura de búsqueda distinta (`search_options()`/
+      `abrir_option()`, no `buscar_producto()`), pero mismo selector de
+      lupa y mismo reset por fila, así que el mecanismo de fondo aplica
+      igual. Ver sección "Optimización de navegación (Modificar
+      Description y Comment)" arriba.
+- [ ] Validar contra Tourplan real el atajo de la lupa en Modificar
+      Description y Comment — portado por analogía, sin correr todavía.
+      Punto a confirmar especialmente acá: que la lupa siga abriendo el
+      popover rápido después de `exit_to_results()` (volver a la grilla
+      de resultados), no solo "dentro" de un producto como en los otros
+      dos scripts. Probar con 2+ filas PENDIENTE del mismo SUPPLIER.
+- [ ] Evaluar portar el mismo atajo de la lupa a Copy y Linkeo PCM y a
+      Flag as Deleted — recién después de validar el de Modificar
+      Description y Comment contra Tourplan real. Flag as Deleted
+      necesita más trabajo que los demás: no usa la misma arquitectura
+      de búsqueda (`_completar_filtros_busqueda`) que los otros tres —
+      tiene sus propias funciones paso a paso (`reset_search`,
+      `select_location`, `select_supplier`, etc.), así que el atajo
+      habría que adaptarlo, no portarlo tal cual.
 
 ## Estructura
 
