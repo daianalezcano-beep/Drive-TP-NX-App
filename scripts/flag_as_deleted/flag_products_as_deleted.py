@@ -843,6 +843,188 @@ def buscar_productos(driver, location, supplier_code, service_type, product_code
 
     return get_result_rows(driver), aviso, None
 
+def _en_contexto_producto(driver):
+    """Confirma que el detalle de un producto cargó (#tabs-product) —
+    misma espera que ya hace procesar_item() tras clickear una fila del
+    grid, reusada acá para confirmar que el atajo de la lupa realmente
+    abrió un producto (no solo un popover vacío)."""
+    try:
+        wait(driver, SEL["TABS_PRODUCT"], t=WAIT_SHORT)
+        return True
+    except TimeoutException:
+        return False
+
+def _hacer_scroll_resultados(driver):
+    """Escrollea la grilla virtual de resultados de Product Search un
+    paso (misma lógica ya confirmada en Extracción de Vigencias /
+    Valorización desde Excel / Modificar Description y Comment / Copy y
+    Linkeo PCM)."""
+    return bool(driver.execute_script("""
+        function contenedorScroll(){
+            var fila = document.querySelector('table tbody tr');
+            if (!fila) return null;
+            var cur = fila.closest('table');
+            while (cur && cur !== document.body){
+                if (cur.scrollHeight > cur.clientHeight + 5) return cur;
+                cur = cur.parentElement;
+            }
+            return document.scrollingElement || document.body;
+        }
+        var c = contenedorScroll();
+        if (!c) return false;
+        var antes = c.scrollTop;
+        c.scrollTop = c.scrollTop + c.clientHeight;
+        return c.scrollTop > antes;
+    """))
+
+def _saltar_a_producto_via_lupa(driver, product_code):
+    """Atajo de navegación: si el driver ya está sobre #/product con el
+    detalle de un producto abierto (procesar_item ya lo clickeó, sin
+    reset_search() de por medio), clickear el mismo botón de la lupa
+    (SEL['SEARCH_BTN'], el que usa open_search_filters() tras un reset
+    completo) reabre en cambio un popover liviano con la MISMA lista de
+    resultados de la búsqueda anterior — evita reset_search() +
+    open_search_filters() + select_location/supplier/service_type +
+    enter_product_code + get_result_rows() completos para el siguiente
+    producto del grupo. Mismo mecanismo ya confirmado en Extracción de
+    Vigencias / Valorización desde Excel / Modificar Description y
+    Comment / Copy y Linkeo PCM (ver README).
+
+    La primera fila del popover es SIEMPRE el producto en el que ya se
+    está parado — se descarta siempre. Matchea por td.tpcol-optioncode
+    (columna confirmada por inspección real, ver match_supplier_row) y
+    clickea la celda td.on-click-editaction de esa fila (la misma que
+    usa _click_target_cell() para abrir el detalle) — no una celda
+    cualquiera. No verifica service_type: la grilla de resultados de
+    este script no expone esa columna (ver _row_label), y el flujo
+    original tampoco lo verificaba post-click.
+
+    Devuelve True si encontró el código, lo clickeó y confirmó que
+    #tabs-product cargó. Devuelve False ante cualquier duda — el
+    llamador debe recurrir a buscar_productos() (reset completo)."""
+    try:
+        lupa = wait_click(driver, SEL["SEARCH_BTN"], t=WAIT_SHORT)
+        jc(driver, lupa)
+        time.sleep(1.5)
+    except TimeoutException:
+        return False
+
+    cod_upper = (product_code or "").strip().upper()
+    if not cod_upper:
+        return False
+
+    def _click_si_esta():
+        return driver.execute_script("""
+            var cod = arguments[0];
+            var dialogs = document.querySelectorAll('tp-dialog');
+            if (!dialogs.length) return null;
+            var dlg = dialogs.length > 1 ? dialogs[1] : dialogs[0];
+            var rows = Array.from(dlg.querySelectorAll('tr')).slice(1);
+            for (var tr of rows){
+                var codCell = tr.querySelector('td.tpcol-optioncode');
+                if (!codCell || codCell.innerText.trim().toUpperCase() !== cod) continue;
+                var target = tr.querySelector('td.on-click-editaction') || tr.querySelector('td');
+                if (!target) continue;
+                target.click();
+                return target.innerText.trim().slice(0,50) || 'clicked';
+            }
+            return null;
+        """, cod_upper)
+
+    def _scroll_popover():
+        return bool(driver.execute_script("""
+            var dialogs = document.querySelectorAll('tp-dialog');
+            if (!dialogs.length) return false;
+            var dlg = dialogs.length > 1 ? dialogs[1] : dialogs[0];
+            var fila = dlg.querySelector('tr');
+            if (!fila) return false;
+            var cur = fila.closest('table');
+            while (cur && cur !== dlg){
+                if (cur.scrollHeight > cur.clientHeight + 5){
+                    var antes = cur.scrollTop;
+                    cur.scrollTop = cur.scrollTop + cur.clientHeight;
+                    return cur.scrollTop > antes;
+                }
+                cur = cur.parentElement;
+            }
+            return false;
+        """))
+
+    clicked = _click_si_esta()
+    intentos = 0
+    while not clicked and intentos < 40:
+        if not _scroll_popover():
+            break
+        time.sleep(0.4)
+        clicked = _click_si_esta()
+        intentos += 1
+
+    if not clicked:
+        return False
+
+    time.sleep(1.5)
+    return _en_contexto_producto(driver)
+
+def _abrir_primero_de_grupo(driver, supplier_code, product_code):
+    """Abre el primer producto de un grupo de 2+ filas PENDIENTE del
+    mismo SUPPLIER_CODE: busca SOLO por proveedor (sin Location/Service
+    Type/Product Code) para dejar la lista más amplia posible en
+    pantalla — necesario para que _saltar_a_producto_via_lupa() pueda
+    encontrar cualquier código del grupo en las filas siguientes.
+    Escrollea de a poco buscando la fila del product_code pedido (grilla
+    virtual sin paginación, mismo patrón progresivo de los otros scripts
+    portados) — nunca asume que ya escrolleó lo suficiente.
+
+    Devuelve True si encontró y clickeó el product_code (y #tabs-product
+    cargó). Devuelve False ante cualquier duda — el llamador debe
+    recurrir a buscar_productos() con los filtros propios de la fila."""
+    cod_upper = (product_code or "").strip().upper()
+    if not cod_upper:
+        return False
+
+    reset_search(driver)
+    open_search_filters(driver)
+    try:
+        wait(driver, SEL["FIELD_LOCATION"], t=WAIT_MEDIUM)
+    except TimeoutException:
+        return False
+    if not select_supplier(driver, supplier_code):
+        return False
+
+    rows = get_result_rows(driver)
+    if not rows:
+        return False
+
+    def _click_si_esta():
+        return driver.execute_script("""
+            var cod = arguments[0];
+            var rows = Array.from(document.querySelectorAll(arguments[1]));
+            for (var tr of rows){
+                var codCell = tr.querySelector('td.tpcol-optioncode');
+                if (!codCell || codCell.innerText.trim().toUpperCase() !== cod) continue;
+                var target = tr.querySelector('td.on-click-editaction') || tr.querySelector('td');
+                if (!target) continue;
+                target.click();
+                return target.innerText.trim().slice(0,50) || 'clicked';
+            }
+            return null;
+        """, cod_upper, SEL["RESULTS_ROWS"])
+
+    clicked = _click_si_esta()
+    intentos = 0
+    while not clicked and intentos < 40:
+        if not _hacer_scroll_resultados(driver):
+            break
+        time.sleep(0.4)
+        clicked = _click_si_esta()
+        intentos += 1
+
+    if not clicked:
+        return False
+
+    time.sleep(1.5)
+    return _en_contexto_producto(driver)
+
 def _click_target_cell(target_row):
     """`on-click-editaction` es una CLASE CSS (no un atributo con valor —
     el dump anterior solo imprimía class+texto, lo que hacía parecer un
@@ -857,21 +1039,13 @@ def _click_target_cell(target_row):
     return cells[0] if cells else None
 
 # ── Abrir un producto de la grilla y tildar/leer el checkbox ───────────────
-def procesar_item(driver, target_row, location, service_type, product_code, label):
-    """Clickea la fila ya localizada en la grilla de resultados y aplica el
-    flujo de lectura o de tildado+guardado sobre ESE producto puntual.
-    Devuelve (estado_item, detalle_item) — no es el ESTADO final de la fila
-    del Excel, que puede agrupar varios ítems si SUPPLIER_CODE está vacío."""
-    click_target = _click_target_cell(target_row) or target_row
-    jc(driver, click_target)
-    time.sleep(1.5)
-
-    try:
-        wait(driver, SEL["TABS_PRODUCT"], t=WAIT_LONG)
-    except TimeoutException:
-        _diagnostico(driver, f"detalle_no_cargo_{label or 'item'}")
-        return "ERROR", "el detalle del producto no cargó (#tabs-product)"
-
+def _aplicar_flag_en_producto_abierto(driver, location, service_type, product_code, label):
+    """Cuerpo de procesar_item() a partir de que #tabs-product ya cargó —
+    extraído para poder reusarse tanto cuando se clickeó la fila del grid
+    (procesar_item) como cuando se saltó directo via el atajo de la lupa
+    (_saltar_a_producto_via_lupa / _abrir_primero_de_grupo, que ya
+    esperaron #tabs-product antes de devolver True). Sin cambios de
+    lógica respecto del cuerpo original de procesar_item()."""
     etiqueta_archivo = f"{location}_{service_type}_{product_code}_{label or 'item'}"
 
     if MODO == "lectura":
@@ -913,8 +1087,44 @@ def procesar_item(driver, target_row, location, service_type, product_code, labe
     time.sleep(3)
     return "HECHO", None
 
+def procesar_item(driver, target_row, location, service_type, product_code, label):
+    """Clickea la fila ya localizada en la grilla de resultados y aplica el
+    flujo de lectura o de tildado+guardado sobre ESE producto puntual.
+    Devuelve (estado_item, detalle_item) — no es el ESTADO final de la fila
+    del Excel, que puede agrupar varios ítems si SUPPLIER_CODE está vacío."""
+    click_target = _click_target_cell(target_row) or target_row
+    jc(driver, click_target)
+    time.sleep(1.5)
+
+    try:
+        wait(driver, SEL["TABS_PRODUCT"], t=WAIT_LONG)
+    except TimeoutException:
+        _diagnostico(driver, f"detalle_no_cargo_{label or 'item'}")
+        return "ERROR", "el detalle del producto no cargó (#tabs-product)"
+
+    return _aplicar_flag_en_producto_abierto(driver, location, service_type, product_code, label)
+
+def _clave_busqueda(row):
+    """Clave de agrupación para el atajo de la lupa: SUPPLIER_CODE solo
+    (una búsqueda por proveedor en Tourplan ya lista todos los locations/
+    service types de ese proveedor, en orden alfabético por location —
+    mismo comportamiento confirmado en los otros scripts portados)."""
+    return (str(row.get(COL_SUPPLIER_CODE) or "").strip().upper(),)
+
+def _agrupar_por_busqueda(pendientes):
+    """Agrupa filas PENDIENTE consecutivas por _clave_busqueda(),
+    preservando el orden original."""
+    grupos = []
+    for fila in pendientes:
+        clave = _clave_busqueda(fila)
+        if grupos and _clave_busqueda(grupos[-1][0]) == clave:
+            grupos[-1].append(fila)
+        else:
+            grupos.append([fila])
+    return grupos
+
 # ── Procesamiento de una fila ──────────────────────────────────
-def process_row(driver, row):
+def process_row(driver, row, continuar_grupo=False, primero_de_grupo_multiple=False):
     location      = str(row.get(COL_LOCATION) or "").strip()
     service_type  = str(row.get(COL_SERVICE_TYPE) or "").strip()
     supplier_code = str(row.get(COL_SUPPLIER_CODE) or "").strip()
@@ -933,18 +1143,31 @@ def process_row(driver, row):
 
     avisos = []
 
-    rows, aviso, err = buscar_productos(driver, location, supplier_code, service_type, product_code)
-    if err:
-        _diagnostico(driver, f"busqueda_fallo_row{row_idx}")
-        return "ERROR", err
-    if aviso:
-        avisos.append(aviso)
-
-    if not rows:
-        return "ERROR", _con_avisos(avisos, "Producto no encontrado")
-
-    # ── SUPPLIER_CODE completo: identificar y procesar una sola fila ──
+    # ── SUPPLIER_CODE completo: un solo ítem — acá aplica el atajo de la
+    # lupa entre filas PENDIENTE del mismo proveedor (ver _agrupar_por_busqueda
+    # en el loop principal). Si el atajo no aplica o falla, cae exactamente
+    # al flujo original (buscar_productos + match_supplier_row) sin cambios.
     if supplier_code:
+        if continuar_grupo and product_code and _saltar_a_producto_via_lupa(driver, product_code):
+            estado_item, detalle_item = _aplicar_flag_en_producto_abierto(
+                driver, location, service_type, product_code, supplier_code)
+            return estado_item, _con_avisos(avisos, detalle_item)
+
+        if primero_de_grupo_multiple and product_code and _abrir_primero_de_grupo(
+                driver, supplier_code, product_code):
+            estado_item, detalle_item = _aplicar_flag_en_producto_abierto(
+                driver, location, service_type, product_code, supplier_code)
+            return estado_item, _con_avisos(avisos, detalle_item)
+
+        rows, aviso, err = buscar_productos(driver, location, supplier_code, service_type, product_code)
+        if err:
+            _diagnostico(driver, f"busqueda_fallo_row{row_idx}")
+            return "ERROR", err
+        if aviso:
+            avisos.append(aviso)
+        if not rows:
+            return "ERROR", _con_avisos(avisos, "Producto no encontrado")
+
         matched_row, msg = match_supplier_row(rows, supplier_code)
         if matched_row is None:
             return "ERROR", _con_avisos(avisos, msg)
@@ -953,44 +1176,71 @@ def process_row(driver, row):
         return estado_item, _con_avisos(avisos, detalle_item)
 
     # ── SUPPLIER_CODE (u otro filtro) vacío: procesar TODOS los resultados ──
+    # (sin cambios respecto del flujo original, salvo que el ítem 2+ intenta
+    # primero el atajo de la lupa antes de la re-búsqueda completa — ver
+    # _saltar_a_producto_via_lupa: acá siempre aplica sin depender de
+    # SUPPLIER_CODE porque la re-búsqueda completa usa los MISMOS filtros
+    # para cada ítem, así que el popover de la lupa muestra la MISMA lista.)
+    rows, aviso, err = buscar_productos(driver, location, supplier_code, service_type, product_code)
+    if err:
+        _diagnostico(driver, f"busqueda_fallo_row{row_idx}")
+        return "ERROR", err
+    if aviso:
+        avisos.append(aviso)
+    if not rows:
+        return "ERROR", _con_avisos(avisos, "Producto no encontrado")
+
     # Se identifica cada fila por su contenido completo (no solo el proveedor),
     # porque con más de un filtro vacío los resultados también pueden variar
-    # en location o en product code, no solo en supplier.
+    # en location o en product code, no solo en supplier. Se guarda también
+    # el option code propio de cada ítem (columna td.tpcol-optioncode) para
+    # poder usarlo como código de búsqueda del atajo de la lupa.
     filas_unicas = []
     claves_vistas = set()
     for r in rows:
         clave = _row_key(r)
         if clave not in claves_vistas:
             claves_vistas.add(clave)
-            filas_unicas.append((clave, _row_label(r)))
+            filas_unicas.append((clave, _row_label(r), _row_field(r, "tpcol-optioncode")))
 
     print(f"  ℹ️ Filtro(s) vacío(s): se van a procesar los {len(filas_unicas)} "
-          f"resultado(s) encontrados: {[lbl for _, lbl in filas_unicas]}")
+          f"resultado(s) encontrados: {[lbl for _, lbl, _ in filas_unicas]}")
 
     resumen = []
     n_error = 0
-    for i, (clave, label) in enumerate(filas_unicas):
+    for i, (clave, label, optioncode_item) in enumerate(filas_unicas):
         if i == 0:
-            rows_actuales = rows
+            objetivo = next((r for r in rows if _row_key(r) == clave), None)
+            if objetivo is None:
+                resumen.append(f"{label}: no encontrado en la re-búsqueda")
+                continue
+            estado_item, detalle_item = procesar_item(
+                driver, objetivo, location, service_type, product_code, label)
         else:
-            rows_actuales, _aviso_ignorado, err2 = buscar_productos(
-                driver, location, supplier_code, service_type, product_code)
-            if err2:
-                resumen.append(f"{label}: ERROR re-búsqueda falló ({err2})")
-                n_error += 1
-                continue
-            if not rows_actuales:
-                resumen.append(f"{label}: no apareció en la re-búsqueda "
-                                f"(¿ya estaba tildado y desapareció del listado?)")
-                continue
+            saltado = bool(optioncode_item) and _saltar_a_producto_via_lupa(driver, optioncode_item)
+            if saltado:
+                estado_item, detalle_item = _aplicar_flag_en_producto_abierto(
+                    driver, location, service_type, product_code, label)
+            else:
+                rows_actuales, _aviso_ignorado, err2 = buscar_productos(
+                    driver, location, supplier_code, service_type, product_code)
+                if err2:
+                    resumen.append(f"{label}: ERROR re-búsqueda falló ({err2})")
+                    n_error += 1
+                    continue
+                if not rows_actuales:
+                    resumen.append(f"{label}: no apareció en la re-búsqueda "
+                                    f"(¿ya estaba tildado y desapareció del listado?)")
+                    continue
 
-        objetivo = next((r for r in rows_actuales if _row_key(r) == clave), None)
-        if objetivo is None:
-            resumen.append(f"{label}: no encontrado en la re-búsqueda")
-            continue
+                objetivo = next((r for r in rows_actuales if _row_key(r) == clave), None)
+                if objetivo is None:
+                    resumen.append(f"{label}: no encontrado en la re-búsqueda")
+                    continue
 
-        estado_item, detalle_item = procesar_item(
-            driver, objetivo, location, service_type, product_code, label)
+                estado_item, detalle_item = procesar_item(
+                    driver, objetivo, location, service_type, product_code, label)
+
         resumen.append(f"{label}: {estado_item}"
                         + (f" ({detalle_item})" if detalle_item else ""))
         if estado_item == "ERROR":
@@ -1033,23 +1283,31 @@ try:
     login(driver)
     open_product_setup(driver)
 
-    for row in pendientes:
-        chequear_abort()
-        row_idx = row["__row_idx__"]
-        print(f"\n{'─'*60}")
-        print(f"Fila {row_idx}: {row.get(COL_LOCATION)} / {row.get(COL_SERVICE_TYPE)} / "
-              f"{row.get(COL_SUPPLIER_CODE)} / {row.get(COL_PRODUCT_CODE)}")
+    grupos = _agrupar_por_busqueda(pendientes)
+    for grupo in grupos:
+        clave = _clave_busqueda(grupo[0])
+        grupo_multiple = len(grupo) > 1 and all(clave)
+        for idx_en_grupo, row in enumerate(grupo):
+            chequear_abort()
+            row_idx = row["__row_idx__"]
+            print(f"\n{'─'*60}")
+            print(f"Fila {row_idx}: {row.get(COL_LOCATION)} / {row.get(COL_SERVICE_TYPE)} / "
+                  f"{row.get(COL_SUPPLIER_CODE)} / {row.get(COL_PRODUCT_CODE)}")
 
-        estado, observaciones = "ERROR", "Error desconocido"
-        try:
-            estado, observaciones = process_row(driver, row)
-        except Exception:
-            estado = "ERROR"
-            observaciones = traceback.format_exc(limit=3)
-            ss(driver, f"fatal_row{row_idx}")
+            estado, observaciones = "ERROR", "Error desconocido"
+            try:
+                estado, observaciones = process_row(
+                    driver, row,
+                    continuar_grupo=grupo_multiple and idx_en_grupo > 0,
+                    primero_de_grupo_multiple=grupo_multiple and idx_en_grupo == 0,
+                )
+            except Exception:
+                estado = "ERROR"
+                observaciones = traceback.format_exc(limit=3)
+                ss(driver, f"fatal_row{row_idx}")
 
-        print(f"  Estado: {estado}" + (f" — {observaciones}" if observaciones else ""))
-        update_row(ws, row_idx, columnas, estado=estado, observaciones=observaciones)
+            print(f"  Estado: {estado}" + (f" — {observaciones}" if observaciones else ""))
+            update_row(ws, row_idx, columnas, estado=estado, observaciones=observaciones)
 
 except AbortadoPorUsuario:
     _abortado = True

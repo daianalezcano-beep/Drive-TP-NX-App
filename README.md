@@ -539,6 +539,81 @@ de `cerrar_pcm()` dice que sí (no hay `driver.get()` de por medio), pero
 no está confirmado en una corrida real. Probar con 2+ filas PENDIENTE del
 mismo SUPPLIER.
 
+## Optimización de navegación (Flag as Deleted) — atajo de la lupa
+
+Arquitectura de búsqueda distinta a los otros cuatro scripts portados:
+este no usa `_completar_filtros_busqueda()`/`buscar_producto()` ni
+`search_options()`, sino sus propias funciones paso a paso —
+`reset_search()` (el mismo reset completo `driver.get(#/home)` →
+`driver.get(#/product)`) + `open_search_filters()` (clickea
+`SEL["SEARCH_BTN"]` = `#searchWrapper li:nth-of-type(2) button` — el
+MISMO botón "lupa" de los otros scripts, solo que acá abre el panel de
+filtros en vez de un modal separado) + `select_location()` +
+`select_supplier()` + `select_service_type()` + `enter_product_code()` →
+`get_result_rows()`. Al clickear una fila de la grilla, `procesar_item()`
+abre el detalle del producto (`#tabs-product`, con el checkbox "Flag
+Product as Deleted" y el campo CLASS) — la misma pantalla/ruta
+`#/product`, sin recargar. Como el botón de la lupa es el mismo en
+ambos casos, el mecanismo de popover rápido aplica igual: clickearlo
+de nuevo estando "dentro" del detalle de un producto (sin
+`reset_search()` de por medio) reabre el popover con la lista de la
+búsqueda anterior en vez del panel de filtros completo.
+
+Este script tenía además un caso propio que el atajo resuelve de
+regalo: cuando SUPPLIER_CODE viene vacío, una sola fila del Excel puede
+matchear varios productos (`filas_unicas` en `process_row()`), y el
+código original hacía una `buscar_productos()` (reset completo) por
+cada ítem 2+ de esa lista — el mismo problema de "sale a buscar de
+nuevo" que tenía la primera versión de Vigencias, pero **dentro de una
+sola fila** en vez de entre filas.
+
+- `_en_contexto_producto(driver)`: confirma que `#tabs-product` cargó —
+  la misma espera que ya hacía `procesar_item()`, reusada para
+  verificar que el atajo realmente abrió un producto.
+- `_saltar_a_producto_via_lupa(driver, product_code)`: clickea la lupa,
+  busca en el popover (segundo `tp-dialog`) la fila cuya
+  `td.tpcol-optioncode` matchea el código exacto (columna ya confirmada
+  por inspección real en `match_supplier_row`), descartando siempre la
+  primera fila, y clickea la celda `td.on-click-editaction` de esa fila
+  — la misma celda que usa `_click_target_cell()` para abrir el
+  detalle, no una celda cualquiera. No verifica `service_type`: la
+  grilla de resultados de este script no expone esa columna, y el flujo
+  original tampoco la verificaba post-click.
+- `_abrir_primero_de_grupo(driver, supplier_code, product_code)`: abre
+  el primer producto de un grupo de 2+ filas PENDIENTE del mismo
+  SUPPLIER_CODE buscando solo por proveedor (reset completo, sin
+  Location/Service Type/Product Code), con el mismo escrolleo progresivo
+  (`_hacer_scroll_resultados()`) ya usado en los otros scripts.
+- `_aplicar_flag_en_producto_abierto()`: extraída del cuerpo de
+  `procesar_item()` (a partir de que `#tabs-product` ya cargó) para
+  poder reusarla tanto si se llegó clickeando la fila del grid como si
+  se llegó por el atajo de la lupa — sin cambios de lógica.
+- `_clave_busqueda()` / `_agrupar_por_busqueda()`: agrupan las filas
+  PENDIENTE por SUPPLIER_CODE (igual que en los otros scripts). Solo
+  aplica en la rama de `process_row()` donde SUPPLIER_CODE viene
+  completo (un ítem por fila) — cuando viene vacío, el atajo dentro de
+  la fila (ítems 2+ de `filas_unicas`) se intenta siempre, sin depender
+  de agrupamiento entre filas, porque la re-búsqueda completa de esos
+  ítems ya usa los mismos filtros y por lo tanto el popover muestra la
+  misma lista.
+- `process_row()` recibe `continuar_grupo`/`primero_de_grupo_multiple`;
+  si el atajo no aplica o falla, cae exactamente al flujo original
+  (`buscar_productos()` + `match_supplier_row()`), sin cambios.
+
+**Sin correr todavía contra Tourplan real** — portado por analogía con
+los otros cuatro scripts, pero sobre una arquitectura de búsqueda propia
+nunca antes portada. Puntos a confirmar especialmente acá: que el
+popover de la lupa comparta las mismas clases de columna
+(`td.tpcol-optioncode`, `td.on-click-editaction`) que la grilla de
+resultados principal (asumido por ser el mismo componente de grilla,
+no confirmado en el popover en sí), y que el mecanismo aplique igual
+tanto en MODO lectura (sin Save) como en escritura/completo (con Save)
+— en ambos casos el driver debería quedar sobre `#tabs-product` sin
+`driver.get()` de por medio, pero no está confirmado en una corrida
+real. Probar primero en MODO lectura con 2+ filas PENDIENTE del mismo
+SUPPLIER_CODE, y por separado el caso de una sola fila con
+SUPPLIER_CODE vacío que matchee 2+ productos.
+
 ## URL de Tourplan — producción por default, editable
 
 El campo de URL viene precargado con `https://tourplannx.eurotur.com.ar/tourplannx`
@@ -1435,11 +1510,22 @@ correctamente.
       después de todo el ida-y-vuelta de ventanas (abrir PCM, copiar,
       linkear, cerrar), no solo tras un `buscar_producto()` simple como en
       los otros scripts. Probar con 2+ filas PENDIENTE del mismo SUPPLIER.
-- [ ] Evaluar portar el mismo atajo de la lupa a Flag as Deleted — no usa
-      la misma arquitectura de búsqueda (`_completar_filtros_busqueda`)
-      que los demás scripts: tiene sus propias funciones paso a paso
-      (`reset_search`, `select_location`, `select_supplier`, etc.), así
-      que el atajo habría que adaptarlo, no portarlo tal cual.
+- [x] Portar el atajo de la lupa a **Flag as Deleted** — arquitectura de
+      búsqueda propia (`reset_search`/`select_location`/`select_supplier`/
+      `select_service_type`/`enter_product_code`/`get_result_rows`, no
+      `_completar_filtros_busqueda`), pero mismo botón de lupa
+      (`SEL["SEARCH_BTN"]`) y misma ruta `#/product` sin recarga entre
+      producto y producto, así que el mecanismo de fondo aplica igual. De
+      paso resuelve también el caso de una sola fila con SUPPLIER_CODE
+      vacío que matchea 2+ productos (antes hacía una búsqueda completa
+      por cada ítem 2+). Ver sección "Optimización de navegación (Flag as
+      Deleted)" arriba.
+- [ ] Validar contra Tourplan real el atajo de la lupa en Flag as
+      Deleted — portado por analogía, sin correr todavía, y sobre una
+      arquitectura de búsqueda nunca antes portada. Probar primero en
+      MODO lectura con 2+ filas PENDIENTE del mismo SUPPLIER_CODE, y por
+      separado una fila con SUPPLIER_CODE vacío que matchee 2+
+      productos.
 
 ## Estructura
 
