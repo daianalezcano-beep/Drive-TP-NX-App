@@ -498,6 +498,47 @@ alcanza con no pasar por `#/home`, así que debería aplicar igual, pero
 no está confirmado en este flujo puntual. Probar con 2+ filas PENDIENTE
 del mismo SUPPLIER.
 
+## Optimización de navegación (Copy y Linkeo PCM) — atajo de la lupa
+
+Mismo mecanismo que en Valorización desde Excel (misma arquitectura de
+búsqueda, `buscar_producto()`), pero el flujo de este script es bastante
+más largo por fila: `buscar_producto()` → `ir_a_used_in()` → ubicar el
+PCM Package Header → `abrir_pcm()` (abre una ventana nueva) → chequeo de
+tarifas vencidas → `copiar_pcm()` → `linkear_pcm_a_servicio()` (usa un
+diálogo completamente distinto — OPERATION → Package Setup → "FIND
+PRODUCTS" —, no la lupa de `#searchWrapper`, así que esta parte no
+cambia) → `cerrar_pcm(driver, handle_prod)`, que cierra la ventana del
+PCM y vuelve a la ventana del servicio madre original **sin** pasar por
+`driver.get()`. Ese último punto es el que habilita el atajo: al llegar
+a la fila siguiente, el driver sigue en `#/product` mirando el servicio
+madre anterior, cumpliendo la precondición de la lupa rápida.
+
+- `_clave_busqueda()` / `_agrupar_por_busqueda()`: agrupan las filas
+  PENDIENTE por SUPPLIER (igual que en los otros scripts).
+- `_saltar_a_producto_via_lupa(driver, codigo, service_type=None)`: mismo
+  atajo — clickea la lupa, busca en el popover (segundo `tp-dialog`) la
+  fila que matchea código + service type, descartando siempre la primera
+  fila (el producto actual). Verifica `service_type` porque el propio
+  `matchRow` de `buscar_producto()` en este script también lo hace.
+- `_abrir_primero_de_grupo(driver, supplier, codigo, service_type=None)`:
+  abre la primera fila de un grupo de 2+ buscando solo por proveedor
+  (reset completo + lupa + tab SELECTION si hace falta + relleno de
+  Supplier), con el mismo escrolleo progresivo (`_hacer_scroll_resultados()`)
+  ya usado en Vigencias/Valorización desde Excel.
+- `procesar_fila()` recibe `continuar_grupo`/`primero_de_grupo_multiple`
+  desde el loop principal; si ninguno de los dos atajos abre el
+  producto, cae exactamente al `buscar_producto()` original, sin
+  cambios.
+
+**Sin correr todavía contra Tourplan real** — portado por analogía con
+Valorización desde Excel. Punto a confirmar especialmente acá: que tras
+todo el ida-y-vuelta de ventanas (abrir PCM, copiar, linkear, cerrar) el
+driver realmente vuelva a quedar "dentro" del servicio madre como para
+que la lupa muestre el popover rápido en la fila siguiente — la lectura
+de `cerrar_pcm()` dice que sí (no hay `driver.get()` de por medio), pero
+no está confirmado en una corrida real. Probar con 2+ filas PENDIENTE del
+mismo SUPPLIER.
+
 ## URL de Tourplan — producción por default, editable
 
 El campo de URL viene precargado con `https://tourplannx.eurotur.com.ar/tourplannx`
@@ -1381,14 +1422,24 @@ correctamente.
       popover rápido después de `exit_to_results()` (volver a la grilla
       de resultados), no solo "dentro" de un producto como en los otros
       dos scripts. Probar con 2+ filas PENDIENTE del mismo SUPPLIER.
-- [ ] Evaluar portar el mismo atajo de la lupa a Copy y Linkeo PCM y a
-      Flag as Deleted — recién después de validar el de Modificar
-      Description y Comment contra Tourplan real. Flag as Deleted
-      necesita más trabajo que los demás: no usa la misma arquitectura
-      de búsqueda (`_completar_filtros_busqueda`) que los otros tres —
-      tiene sus propias funciones paso a paso (`reset_search`,
-      `select_location`, `select_supplier`, etc.), así que el atajo
-      habría que adaptarlo, no portarlo tal cual.
+- [x] Portar el atajo de la lupa a **Copy y Linkeo PCM** — misma
+      arquitectura de búsqueda que Valorización desde Excel
+      (`buscar_producto()`); se confirmó por lectura de código que
+      `cerrar_pcm()` no hace `driver.get()` al volver del PCM copiado, así
+      que el driver queda en condiciones de usar el popover rápido en la
+      fila siguiente. Ver sección "Optimización de navegación (Copy y
+      Linkeo PCM)" arriba.
+- [ ] Validar contra Tourplan real el atajo de la lupa en Copy y Linkeo
+      PCM — portado por analogía, sin correr todavía. Punto a confirmar
+      especialmente acá: que la lupa siga mostrando el popover rápido
+      después de todo el ida-y-vuelta de ventanas (abrir PCM, copiar,
+      linkear, cerrar), no solo tras un `buscar_producto()` simple como en
+      los otros scripts. Probar con 2+ filas PENDIENTE del mismo SUPPLIER.
+- [ ] Evaluar portar el mismo atajo de la lupa a Flag as Deleted — no usa
+      la misma arquitectura de búsqueda (`_completar_filtros_busqueda`)
+      que los demás scripts: tiene sus propias funciones paso a paso
+      (`reset_search`, `select_location`, `select_supplier`, etc.), así
+      que el atajo habría que adaptarlo, no portarlo tal cual.
 
 ## Estructura
 

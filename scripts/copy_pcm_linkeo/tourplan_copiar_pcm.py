@@ -416,6 +416,267 @@ def parsear_fecha(txt):
 class ProductoNoEncontrado(Exception):
     pass
 
+def _en_contexto_producto(driver):
+    """Confirma que el driver quedó parado en un producto (menú con
+    RATES/UTILITIES/etc.), abriendo y volviendo a cerrar el menú
+    hamburguesa. Extraída de buscar_producto() para poder reusarla desde
+    el atajo de navegación _saltar_a_producto_via_lupa()."""
+    try:
+        img = WebDriverWait(driver, 4).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "nav img")))
+        driver.execute_script("arguments[0].click();", img)
+        time.sleep(2 * VELOCIDAD)
+        items = driver.execute_script("""
+            return Array.from(document.querySelectorAll('nav ul > li')).map(function(li){
+                return (li.querySelector('div div')||li).innerText.trim().split('\\n')[0].toUpperCase();
+            });
+        """) or []
+        print(f"    Menu: {items}")
+        PROD_ITEMS = {'UTILITIES', 'RATES', 'SEASONALITY', 'OPERATION', 'CONTENT', 'PRODUCT DETAILS'}
+        ok = bool(set(items) & PROD_ITEMS)
+        driver.execute_script("arguments[0].click();", img)
+        time.sleep(1)
+        return ok, items
+    except Exception:
+        return False, []
+
+
+def _hacer_scroll_resultados(driver):
+    """Escrollea la grilla virtual de resultados de Product Search un
+    paso (misma lógica ya confirmada en Extracción de Vigencias /
+    Valorización desde Excel / Modificar Description y Comment)."""
+    return bool(driver.execute_script("""
+        function contenedorScroll(){
+            var fila = document.querySelector('table tbody tr');
+            if (!fila) return null;
+            var cur = fila.closest('table');
+            while (cur && cur !== document.body){
+                if (cur.scrollHeight > cur.clientHeight + 5) return cur;
+                cur = cur.parentElement;
+            }
+            return document.scrollingElement || document.body;
+        }
+        var c = contenedorScroll();
+        if (!c) return false;
+        var antes = c.scrollTop;
+        c.scrollTop = c.scrollTop + c.clientHeight;
+        return c.scrollTop > antes;
+    """))
+
+
+def _saltar_a_producto_via_lupa(driver, codigo, service_type=None):
+    """Atajo de navegación: si el driver ya está en #/product con un
+    producto abierto de una búsqueda anterior (sin pasar por #/home de
+    por medio), clickear la lupa reabre un popover con la MISMA lista de
+    resultados de esa búsqueda, en vez del modal completo de Product
+    Search — evita repetir Location/Supplier/Service Type y el reset de
+    página que hace buscar_producto() en cada fila. Mismo mecanismo ya
+    confirmado en Extracción de Vigencias / Valorización desde Excel /
+    Modificar Description y Comment (ver README).
+
+    La primera fila del popover es SIEMPRE el producto en el que ya se
+    está parado (no una opción real de la lista) — se descarta siempre.
+    Si se da service_type, exige que la fila matchee código Y service
+    type (igual que el matchRow de buscar_producto) — necesario acá
+    porque el grupo se arma por SUPPLIER solo y el popover puede traer
+    varios service types mezclados.
+
+    Devuelve True si encontró el código pedido, lo clickeó y confirmó
+    contexto de producto. Devuelve False ante cualquier duda — el
+    llamador debe recurrir a buscar_producto(), que resetea de cero."""
+    try:
+        lupa = wait(driver, "#searchWrapper li:nth-of-type(2) button", t=4)
+        jc(driver, lupa)
+        time.sleep(2 * VELOCIDAD)
+    except Exception:
+        return False
+
+    cod_upper = (codigo or "").strip().upper()
+    st_upper = (service_type or "").strip().upper()
+
+    def _click_si_esta():
+        return driver.execute_script("""
+            var cod = arguments[0];
+            var st  = arguments[1];
+            var dialogs = document.querySelectorAll('tp-dialog');
+            if (!dialogs.length) return null;
+            var dlg = dialogs.length > 1 ? dialogs[1] : dialogs[0];
+            var rows = Array.from(dlg.querySelectorAll('tr')).slice(1);
+            for (var tr of rows){
+                var tds = Array.from(tr.querySelectorAll('td'));
+                var hasCod = tds.some(function(td){
+                    return td.children.length===0 && td.innerText.trim().toUpperCase()===cod;
+                });
+                if (!hasCod) continue;
+                if (st){
+                    var hasSt = tds.some(function(td){
+                        return td.children.length===0 && td.innerText.trim().toUpperCase()===st;
+                    });
+                    if (!hasSt) continue;
+                }
+                var target = tds.length > 4 ? tds[4] : (tds.length > 0 ? tds[tds.length-1] : tr);
+                target.click();
+                return target.innerText.trim().slice(0,50) || 'clicked';
+            }
+            return null;
+        """, cod_upper, st_upper)
+
+    def _scroll_popover():
+        return bool(driver.execute_script("""
+            var dialogs = document.querySelectorAll('tp-dialog');
+            if (!dialogs.length) return false;
+            var dlg = dialogs.length > 1 ? dialogs[1] : dialogs[0];
+            var fila = dlg.querySelector('tr');
+            if (!fila) return false;
+            var cur = fila.closest('table');
+            while (cur && cur !== dlg){
+                if (cur.scrollHeight > cur.clientHeight + 5){
+                    var antes = cur.scrollTop;
+                    cur.scrollTop = cur.scrollTop + cur.clientHeight;
+                    return cur.scrollTop > antes;
+                }
+                cur = cur.parentElement;
+            }
+            return false;
+        """))
+
+    clicked = _click_si_esta()
+    intentos = 0
+    while not clicked and intentos < 40:
+        if not _scroll_popover():
+            break
+        time.sleep(0.4 * VELOCIDAD)
+        clicked = _click_si_esta()
+        intentos += 1
+
+    if not clicked:
+        return False
+
+    time.sleep(6 * VELOCIDAD)
+    ok_ctx, _ = _en_contexto_producto(driver)
+    return ok_ctx
+
+
+def _abrir_primero_de_grupo(driver, supplier, codigo, service_type=None):
+    """Abre el primer código de un grupo de 2+ filas del mismo SUPPLIER
+    (ver _agrupar_por_busqueda): busca SOLO por proveedor — sin
+    LOCATION, sin el código en el filtro — deja la lista más amplia
+    posible de resultados de ese proveedor en pantalla (todos los
+    locations/service types que tenga) y clickea la fila que matchea
+    código + service type (si se dio).
+
+    Escrollea de a poco buscando la fila en cada paso (grilla virtual
+    sin paginación, mismo patrón progresivo ya usado en los otros
+    scripts) — nunca asume que ya escrolleó lo suficiente ni cachea
+    filas por índice.
+
+    Devuelve True si encontró y clickeó el código pedido. Devuelve
+    False ante cualquier duda — el llamador debe recurrir a
+    buscar_producto()."""
+    codigo = str(codigo).strip() if codigo not in (None, "") else ""
+    supplier = str(supplier).strip() if supplier not in (None, "") else ""
+    st_upper = (service_type or "").strip().upper()
+    print(f"\n  📦 Buscando (grupo, solo por proveedor): {supplier} → {codigo}"
+          f"{('/' + st_upper) if st_upper else ''}")
+
+    try:
+        driver.get(f"{BASE_URL}/#/home")
+        time.sleep(2 * VELOCIDAD)
+        driver.get(f"{BASE_URL}/#/product")
+        time.sleep(5 * VELOCIDAD)
+
+        lupa = wait(driver, "#searchWrapper li:nth-of-type(2) button")
+        jc(driver, lupa)
+        time.sleep(3 * VELOCIDAD)
+
+        try:
+            WebDriverWait(driver, 4).until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "div.parameters1 input")))
+        except Exception:
+            driver.execute_script("""
+                var els = Array.from(document.querySelectorAll('li,button,a,div,span'));
+                for (var el of els){
+                    if (!el.offsetParent) continue;
+                    var t = (el.innerText || '').trim().toUpperCase();
+                    if (t === 'SELECTION'){ el.click(); return true; }
+                }
+                return false;
+            """)
+            time.sleep(2 * VELOCIDAD)
+
+        inp_sup = wait(driver, "div.parameters1 li:nth-of-type(2) input")
+        inp_sup.click(); time.sleep(0.3)
+        set_val(driver, inp_sup, supplier)
+        time.sleep(1.5)
+        try:
+            row_sup = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located(
+                    (By.XPATH,
+                     f"//div[contains(@class,'parameters1')]//td[normalize-space(text())='{supplier.upper()}']")))
+            jc(driver, row_sup); time.sleep(1)
+        except Exception:
+            try:
+                inp_sup2 = driver.find_element(By.CSS_SELECTOR,
+                    "div.parameters1 li:nth-of-type(2) input")
+                inp_sup2.send_keys(Keys.TAB); time.sleep(1)
+            except Exception:
+                pass
+
+        btn_search = wait(driver, "#productSearchFilter li:nth-of-type(4) button")
+        jc(driver, btn_search)
+        time.sleep(6 * VELOCIDAD)
+    except Exception:
+        return False
+
+    cod_upper = codigo.upper()
+
+    def _click_si_esta():
+        return driver.execute_script("""
+            var cod = arguments[0];
+            var st  = arguments[1];
+            var rows = Array.from(document.querySelectorAll('table tbody tr'));
+            for (var tr of rows){
+                var tds = Array.from(tr.querySelectorAll('td'));
+                var hasCod = tds.some(function(td){
+                    return td.children.length===0 && td.innerText.trim().toUpperCase()===cod;
+                });
+                if (!hasCod) continue;
+                if (st){
+                    var hasSt = tds.some(function(td){
+                        return td.children.length===0 && td.innerText.trim().toUpperCase()===st;
+                    });
+                    if (!hasSt) continue;
+                }
+                var target = tds.length > 4 ? tds[4] : (tds.length > 0 ? tds[tds.length-1] : tr);
+                target.click();
+                return target.innerText.trim().slice(0,50) || 'clicked';
+            }
+            return null;
+        """, cod_upper, st_upper)
+
+    clicked = _click_si_esta()
+    intentos = 0
+    while not clicked and intentos < 40:
+        if not _hacer_scroll_resultados(driver):
+            break
+        time.sleep(0.4 * VELOCIDAD)
+        clicked = _click_si_esta()
+        intentos += 1
+
+    if not clicked:
+        ss(driver, f"ps_grupo_sin_resultado_{(codigo or 'sin_codigo')[:10]}")
+        return False
+
+    time.sleep(6 * VELOCIDAD)
+    ok_ctx, _ = _en_contexto_producto(driver)
+    if not ok_ctx:
+        ss(driver, f"ps_grupo_contexto_incorrecto_{(codigo or 'sin_codigo')[:10]}")
+        return False
+
+    ss(driver, f"ps_grupo_cargado_{codigo[:10]}")
+    return True
+
+
 def buscar_producto(driver, location, supplier, codigo, service_type=None, handle_origen=None):
     st_upper = (service_type or "").strip().upper()
     st_str   = f"/{st_upper}" if st_upper else ""
@@ -568,26 +829,6 @@ def buscar_producto(driver, location, supplier, codigo, service_type=None, handl
     time.sleep(6 * VELOCIDAD)
     ss(driver, f"ps_resultados_{codigo[:10]}")
 
-    def _en_contexto_producto():
-        try:
-            img = WebDriverWait(driver, 4).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "nav img")))
-            driver.execute_script("arguments[0].click();", img)
-            time.sleep(2 * VELOCIDAD)
-            items = driver.execute_script("""
-                return Array.from(document.querySelectorAll('nav ul > li')).map(function(li){
-                    return (li.querySelector('div div')||li).innerText.trim().split('\\n')[0].toUpperCase();
-                });
-            """) or []
-            print(f"    Menu: {items}")
-            PROD_ITEMS = {'UTILITIES','RATES','SEASONALITY','OPERATION','CONTENT','PRODUCT DETAILS'}
-            ok = bool(set(items) & PROD_ITEMS)
-            driver.execute_script("arguments[0].click();", img)
-            time.sleep(1)
-            return ok, items
-        except Exception as e:
-            return False, []
-
     clicked = driver.execute_script(f"""
         var cod = '{codigo}'.toUpperCase();
         var st  = '{st_upper}';
@@ -623,7 +864,7 @@ def buscar_producto(driver, location, supplier, codigo, service_type=None, handl
     if clicked:
         time.sleep(6 * VELOCIDAD)
         ss(driver, f"ps_cargado_{codigo[:10]}")
-        ok_ctx, menu_items = _en_contexto_producto()
+        ok_ctx, menu_items = _en_contexto_producto(driver)
         if ok_ctx:
             print(f"  ✅ Producto {codigo} en contexto correcto (menú: {menu_items})")
             return
@@ -1319,8 +1560,27 @@ def escribir_resultado(row_num, estado, pcm_original="", pcm_copiado="", error="
     }
     actualizar_fila_sheet(_ws, row_num, _columnas, valores)
 
+def _clave_busqueda(row):
+    """Clave de agrupación para el atajo de la lupa: SUPPLIER solo (una
+    búsqueda por proveedor en Tourplan ya lista todos los locations/
+    service types de ese proveedor, en orden alfabético por location —
+    confirmado por la usuaria)."""
+    return (str(row.get("supplier") or "").strip().upper(),)
+
+def _agrupar_por_busqueda(pendientes):
+    """Agrupa filas PENDIENTE consecutivas por _clave_busqueda(),
+    preservando el orden original."""
+    grupos = []
+    for fila in pendientes:
+        clave = _clave_busqueda(fila)
+        if grupos and _clave_busqueda(grupos[-1][0]) == clave:
+            grupos[-1].append(fila)
+        else:
+            grupos.append([fila])
+    return grupos
+
 # ── Procesar una fila ────────────────────────────────────────
-def procesar_fila(driver, fila):
+def procesar_fila(driver, fila, continuar_grupo=False, primero_de_grupo_multiple=False):
     loc         = str(fila.get("location")     or "").strip()
     sup         = str(fila.get("supplier")     or "").strip()
     stype       = str(fila.get("service_type") or "").strip().upper()
@@ -1346,8 +1606,14 @@ def procesar_fila(driver, fila):
     nombre_nuevo = ""   # el rastro si algo falla después de copiar/renombrar
 
     try:
-        buscar_producto(driver, loc, sup, code, service_type=stype,
-                        handle_origen=handle_prod)
+        saltado = continuar_grupo and _saltar_a_producto_via_lupa(driver, code, service_type=stype)
+        if saltado:
+            pass
+        elif primero_de_grupo_multiple and _abrir_primero_de_grupo(driver, sup, code, service_type=stype):
+            pass
+        else:
+            buscar_producto(driver, loc, sup, code, service_type=stype,
+                            handle_origen=handle_prod)
 
         ir_a_used_in(driver)
         pcm_list = leer_pcm_list_package_header(driver)
@@ -1434,18 +1700,26 @@ driver = crear_driver()
 _abortado = False
 try:
     login(driver)
-    for fila in pendientes:
-        chequear_abort()
-        try:
-            procesar_fila(driver, fila)
-        except Exception as e:
-            print(f"\n❌ ERROR fila {fila.get('_row')}: {e}")
-            ss(driver, f"error_row{fila.get('_row','x')}")
-            escribir_resultado(fila["_row"], "ERROR", error=str(e))
+    grupos = _agrupar_por_busqueda(pendientes)
+    for grupo in grupos:
+        clave = _clave_busqueda(grupo[0])
+        grupo_multiple = len(grupo) > 1 and all(clave)
+        for idx_en_grupo, fila in enumerate(grupo):
+            chequear_abort()
             try:
-                cerrar_pcm(driver, driver.window_handles[0])
-            except Exception:
-                pass
+                procesar_fila(
+                    driver, fila,
+                    continuar_grupo=grupo_multiple and idx_en_grupo > 0,
+                    primero_de_grupo_multiple=grupo_multiple and idx_en_grupo == 0,
+                )
+            except Exception as e:
+                print(f"\n❌ ERROR fila {fila.get('_row')}: {e}")
+                ss(driver, f"error_row{fila.get('_row','x')}")
+                escribir_resultado(fila["_row"], "ERROR", error=str(e))
+                try:
+                    cerrar_pcm(driver, driver.window_handles[0])
+                except Exception:
+                    pass
 except AbortadoPorUsuario:
     _abortado = True
     print("\n⏸️  Corrida abortada por el usuario — las filas que no llegaron a "
