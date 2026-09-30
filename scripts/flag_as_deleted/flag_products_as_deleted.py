@@ -1145,7 +1145,7 @@ def _aplicar_flag_en_producto_abierto(driver, location, service_type, product_co
             return "ERROR", f"DELETE: {detalle_delete}"
         if eliminado:
             _eliminado_reciente[0] = True
-            return "HECHO", "Eliminado"
+            return "OK", "Eliminado"
         aviso_delete = f"No se pudo eliminar ({detalle_delete}) → flag as deleted aplicado"
 
     ok, msg = click_flag_checkbox(driver)
@@ -1177,7 +1177,7 @@ def _aplicar_flag_en_producto_abierto(driver, location, service_type, product_co
     jc(driver, save_btn)
 
     time.sleep(3)
-    return "HECHO", aviso_delete
+    return "OK", aviso_delete
 
 def procesar_item(driver, target_row, location, service_type, product_code, label):
     """Clickea la fila ya localizada en la grilla de resultados y aplica el
@@ -1338,7 +1338,7 @@ def process_row(driver, row, continuar_grupo=False, primero_de_grupo_multiple=Fa
         if estado_item == "ERROR":
             n_error += 1
 
-    estado_final = "ERROR" if n_error else ("PENDIENTE" if MODO == "lectura" else "HECHO")
+    estado_final = "ERROR" if n_error else ("PENDIENTE" if MODO == "lectura" else "OK")
     return estado_final, _con_avisos(avisos, " || ".join(resumen))
 
 # ── MAIN ──────────────────────────────────────────────────────
