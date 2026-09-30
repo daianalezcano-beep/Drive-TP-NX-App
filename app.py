@@ -61,6 +61,13 @@ EDICION_NO_SI = [
 # Cada entrada tiene una "category" (agrupa la navegación del sidebar) y un
 # "script_path" — render_script_tab avisa en la UI en vez de romper si
 # algún script_path todavía no existiera en el repo.
+# Flag as Deleted: qué hacer con cada producto (TOURPLAN_ELIMINAR). Reemplaza al
+# selector de Modo para ese script (no tiene modo lectura en la app).
+ELIMINAR_NO_SI = [
+    ("Flag as deleted", "NO"),
+    ("Delete (si falla, flag as deleted)", "SI"),
+]
+
 SCRIPTS = {
     "copy_products": {
         "label": "Copy Products (05)",
@@ -80,7 +87,8 @@ SCRIPTS = {
         "script_path": REPO_ROOT / "scripts" / "flag_as_deleted" / "flag_products_as_deleted.py",
         "base_url": PRODUCCION_URL,
         "sheet": "PRODUCTOS",
-        "modo_options": MODO_LECTURA_ESCRITURA,
+        "no_modo_info": "ℹ️ Este script aplica los cambios directo en Tourplan (sin modo de solo lectura).",
+        "eliminar_options": ELIMINAR_NO_SI,
     },
     "modificar_description_comment": {
         "label": "Modificar Description y Comment (15)",
@@ -385,6 +393,18 @@ def render_script_tab(key, cfg):
     else:
         edicion_env = None
 
+    eliminar_options = cfg.get("eliminar_options")
+    if eliminar_options:
+        eliminar_label = st.radio(
+            "Acción sobre cada producto",
+            [label for label, _ in eliminar_options],
+            key=f"eliminar_{key}",
+            disabled=state["running"],
+        )
+        eliminar_env = dict(eliminar_options)[eliminar_label]
+    else:
+        eliminar_env = None
+
     campos_completos = bool(sheet_url and username and password and base_url)
 
     col_run, col_abort = st.columns(2)
@@ -433,6 +453,7 @@ def render_script_tab(key, cfg):
             "PYTHONUNBUFFERED": "1",
             **({"TOURPLAN_MODO": modo_env} if modo_env else {}),
             **({"TOURPLAN_EDICION": edicion_env} if edicion_env else {}),
+            **({"TOURPLAN_ELIMINAR": eliminar_env} if eliminar_env else {}),
             "PYTHONIOENCODING": "utf-8",
         })
 

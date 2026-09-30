@@ -17,10 +17,14 @@
 #         glosario fijo de SERVICE_TYPE, manejo del campo CLASS antes de Save, y
 #         espera del botón SAVE por polling activo — según prompt actualizado con
 #         grabaciones del 22/7.
+#   v1.2: opción TOURPLAN_ELIMINAR=SI — intenta primero DELETE (botón DELETE +
+#         confirmación YES); si Tourplan lo rechaza (diálogo de error), sigue con
+#         el flujo de Flag as Deleted. TOURPLAN_MODO ahora tiene default "completo"
+#         (la app ya no ofrece modo lectura para este script).
 # ============================================================
 
-VERSION       = "1.1"
-VERSION_FECHA = "2026-07-23"
+VERSION       = "1.2"
+VERSION_FECHA = "2026-09-30"
 
 # ── CONFIGURACIÓN — via variables de entorno (con default = valor original) ──
 import os
@@ -30,7 +34,10 @@ from common.user_config import (
     TOKEN_PATH as _TOKEN_PATH_DEFAULT,
 )
 
-MODO             = os.environ.get("TOURPLAN_MODO", "lectura")     # "lectura" | "escritura" | "completo"
+MODO             = os.environ.get("TOURPLAN_MODO", "completo")    # "lectura" | "escritura" | "completo"
+# "SI": antes del Flag as Deleted se intenta eliminar el producto (DELETE); si falla, se hace el flag.
+# "NO" (default): solo Flag as Deleted, sin intentar eliminar.
+ELIMINAR         = os.environ.get("TOURPLAN_ELIMINAR", "NO").strip().upper() == "SI"
 SHEET_URL        = os.environ.get("TOURPLAN_SHEET_URL", "")
 HOJA             = os.environ.get("TOURPLAN_HOJA", "PRODUCTOS")
 CREDENTIALS_PATH = os.environ.get("TOURPLAN_CREDENTIALS_PATH", _CREDENTIALS_PATH_DEFAULT)
@@ -113,6 +120,9 @@ SEL = {
     "RESULTS_SUPPLIER_COL": "td.tpcol-suppliercode",
     "TABS_PRODUCT"        : "#tabs-product",
     "SAVE_BTN"            : "tp-button.save > button",
+    "DELETE_BTN"          : "tp-button.delete > button",
+    "DIALOG_CONFIRM"      : "tp-dialog tp-confirm",
+    "DIALOG_ERROR"        : "tp-dialog tp-error",
 }
 
 # Glosario fijo Excel -> texto a buscar en el panel de Service Type (del prompt
@@ -784,6 +794,73 @@ def _dump_save_candidates(driver):
         return out;
     """)
 
+# ── Delete previo al flag (opcional, TOURPLAN_ELIMINAR=SI) ────
+ELIMINAR_POLL_TIMEOUT = 20  # seg esperando el resultado del DELETE tras confirmar con YES
+
+# True justo después de un DELETE exitoso: el producto desapareció, así que el
+# popover de la lupa (lista de la búsqueda anterior) ya no es confiable para
+# saltar al próximo producto — _saltar_a_producto_via_lupa() lo consume y fuerza
+# la re-búsqueda completa.
+_eliminado_reciente = [False]
+
+def _click_dialog_button(driver, dialog_css, texto):
+    return bool(driver.execute_script("""
+        var dlg = document.querySelector(arguments[0]);
+        if (!dlg) return false;
+        var buscado = arguments[1];
+        var btn = Array.from(dlg.querySelectorAll('button')).find(function(b){
+            return (b.innerText||b.textContent||'').trim().toUpperCase() === buscado;
+        });
+        if (!btn) return false;
+        btn.click();
+        return true;
+    """, dialog_css, texto))
+
+def _texto_dialogo_error(driver):
+    """Texto del diálogo de error de Tourplan, o None si no hay ninguno abierto."""
+    return driver.execute_script("""
+        var e = document.querySelector(arguments[0]);
+        if (!e) return null;
+        return (e.innerText || e.textContent || '').trim().replace(/\\s+/g, ' ');
+    """, SEL["DIALOG_ERROR"])
+
+def intentar_eliminar(driver):
+    """DELETE → confirmación YES (grabaciones del 30/9). Devuelve (resultado, detalle):
+      · (True,  None)  el producto se eliminó (desapareció el detalle #tabs-product)
+      · (False, texto) Tourplan rechazó el DELETE (diálogo de error, ya cerrado con OK);
+                       el llamador sigue con Flag as Deleted
+      · (None,  msg)   no se pudo determinar el resultado — el llamador NO debe seguir."""
+    try:
+        btn = wait_click(driver, SEL["DELETE_BTN"], t=WAIT_MEDIUM)
+    except TimeoutException:
+        return None, "no se encontró el botón DELETE"
+    jc(driver, btn)
+
+    try:
+        wait(driver, SEL["DIALOG_CONFIRM"], t=WAIT_MEDIUM)
+    except TimeoutException:
+        return None, "no apareció el diálogo de confirmación del DELETE"
+    time.sleep(0.5)
+    if not _click_dialog_button(driver, SEL["DIALOG_CONFIRM"], "YES"):
+        return None, "no se encontró el botón YES del diálogo de confirmación"
+
+    fin = time.time() + ELIMINAR_POLL_TIMEOUT
+    while time.time() < fin:
+        texto_err = _texto_dialogo_error(driver)
+        if texto_err is not None:
+            texto_err = re.sub(r"\s*OK$", "", texto_err).strip()
+            _click_dialog_button(driver, SEL["DIALOG_ERROR"], "OK")
+            cierre = time.time() + WAIT_SHORT
+            while time.time() < cierre and _texto_dialogo_error(driver) is not None:
+                time.sleep(0.3)
+            time.sleep(0.5)
+            return False, (texto_err[:200] or "sin detalle")
+        if not driver.find_elements(By.CSS_SELECTOR, SEL["TABS_PRODUCT"]):
+            time.sleep(1)
+            return True, None
+        time.sleep(0.5)
+    return None, "no se pudo determinar el resultado del DELETE (timeout)"
+
 # ── Sheet ─────────────────────────────────────────────────────
 def load_sheet():
     ws = conectar_sheets(SHEET_URL, HOJA, CREDENTIALS_PATH, TOKEN_PATH)
@@ -902,6 +979,10 @@ def _saltar_a_producto_via_lupa(driver, product_code):
     Devuelve True si encontró el código, lo clickeó y confirmó que
     #tabs-product cargó. Devuelve False ante cualquier duda — el
     llamador debe recurrir a buscar_productos() (reset completo)."""
+    if _eliminado_reciente[0]:
+        _eliminado_reciente[0] = False
+        return False
+
     try:
         lupa = wait_click(driver, SEL["SEARCH_BTN"], t=WAIT_SHORT)
         jc(driver, lupa)
@@ -1056,6 +1137,17 @@ def _aplicar_flag_en_producto_abierto(driver, location, service_type, product_co
         return "PENDIENTE", (f"[LECTURA] checkbox actualmente "
                               f"{'tildado' if info.get('checked') else 'sin tildar'}")
 
+    aviso_delete = None
+    if ELIMINAR:
+        eliminado, detalle_delete = intentar_eliminar(driver)
+        if eliminado is None:
+            _diagnostico(driver, f"delete_indeterminado_{label or 'item'}")
+            return "ERROR", f"DELETE: {detalle_delete}"
+        if eliminado:
+            _eliminado_reciente[0] = True
+            return "HECHO", "Eliminado"
+        aviso_delete = f"No se pudo eliminar ({detalle_delete}) → flag as deleted aplicado"
+
     ok, msg = click_flag_checkbox(driver)
     if not ok:
         return "ERROR", f"no se encontró o no se pudo tildar 'Flag Product as Deleted' ({msg})"
@@ -1085,7 +1177,7 @@ def _aplicar_flag_en_producto_abierto(driver, location, service_type, product_co
     jc(driver, save_btn)
 
     time.sleep(3)
-    return "HECHO", None
+    return "HECHO", aviso_delete
 
 def procesar_item(driver, target_row, location, service_type, product_code, label):
     """Clickea la fila ya localizada en la grilla de resultados y aplica el
