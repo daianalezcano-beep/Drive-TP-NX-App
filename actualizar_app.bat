@@ -45,6 +45,16 @@ if not defined GIT_EXE (
     exit /b 1
 )
 
+REM La carpeta puede vivir en una unidad de red compartida por todo el
+REM equipo (ej. NAS) — por default, git no confia en carpetas que no
+REM detecta como "propias" del usuario y tira "detected dubious
+REM ownership" en vez de actualizar. Se agrega una excepcion para ESTA
+REM carpeta puntual la primera vez (a diferencia de "config --add"
+REM solo, este chequeo evita que el .gitconfig acumule la misma linea
+REM de nuevo en cada doble clic).
+"%GIT_EXE%" config --global --get-all safe.directory | findstr /L /C:"%CD%" >nul
+if errorlevel 1 "%GIT_EXE%" config --global --add safe.directory "%CD%"
+
 "%GIT_EXE%" pull
 
 pause
