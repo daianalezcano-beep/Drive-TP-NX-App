@@ -99,6 +99,13 @@ navegador). Requiere tener Python instalado — si no lo tenés, `run_app.bat`
 te va a avisar con el link de descarga. La empaquetada como `.exe` (sin
 necesitar Python preinstalado) queda para una etapa siguiente.
 
+**`actualizar_app.bat`** — doble clic para traer los cambios nuevos del
+repo (`git pull`) sin tener que volver a descargar la carpeta entera cada
+vez (mismo patrón que la app de Documentación). Requiere que la carpeta
+local sea un clon de git, no una copia bajada como ZIP — si todavía la
+tenés como ZIP, clonar el repo una sola vez (`git clone <url>`) y a partir
+de ahí el botón ya sirve siempre.
+
 **Google Chrome tiene que estar instalado en la PC.** La app no lo instala
 sola en Windows/Mac (no hay garantía de permisos de administrador) — si no
 lo encuentra, muestra un mensaje pidiendo instalarlo manualmente desde
