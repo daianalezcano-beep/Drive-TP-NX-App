@@ -1476,6 +1476,51 @@ def _escribir_valor_unico(driver, valor, cod):
     return valor_viejo, valor, etiqueta_fila
 
 
+def _cerrar_ventana_valorizacion(driver):
+    """Cierra cualquier tp-dialog/tp-modal que haya quedado abierto tras
+    leer o escribir el valor de un período (la grilla de rates se abre
+    dentro de uno de estos diálogos — ver _escribir_valor_unico — y ni
+    la escritura ni la verificación post-SAVE lo cerraban después).
+    Mismo patrón genérico de cierre (botón EXIT/CANCEL/CLOSE) que ya usa
+    _cancelar_dialog_y_hacer_insert() para COPY DATE RANGE.
+
+    Necesario para que _saltar_a_producto_via_lupa() (atajo de la lupa
+    de la fila siguiente) encuentre el popover de búsqueda nuevo como
+    el tp-dialog correcto, en vez de este diálogo viejo sin cerrar."""
+    try:
+        driver.execute_script("""
+            function vis(e){ return !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length); }
+            var dialogs = Array.from(document.querySelectorAll(
+                'tp-dialog, tp-modal, [role="dialog"]')).filter(vis);
+            for (var dlg of dialogs){
+                var b = dlg.querySelector(
+                    'button.tpcancel, tp-button.cancel > button, tp-button.close > button, tp-button.exit > button');
+                if (!b){
+                    var btns = Array.from(dlg.querySelectorAll('button')).filter(vis);
+                    b = btns.find(function(btn){
+                        var t = (btn.innerText || '').trim().toUpperCase();
+                        return t === 'EXIT' || t === 'CANCEL' || t === 'CLOSE';
+                    });
+                }
+                if (b) b.click();
+            }
+        """)
+        time.sleep(1.5 * VELOCIDAD)
+    except Exception:
+        pass
+
+    for _ in range(4):
+        sigue_abierto = driver.execute_script("""
+            function vis(e){ return !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length); }
+            return Array.from(document.querySelectorAll(
+                'tp-dialog, tp-modal, [role="dialog"]')).some(vis);
+        """)
+        if not sigue_abierto:
+            return
+        time.sleep(1)
+    print("    ⚠ _cerrar_ventana_valorizacion: quedó al menos un diálogo abierto tras 4 intentos")
+
+
 def cargar_tarifa_option(driver, service_code, supplier, location, service_type,
                           rate_from_str, rate_to_str, price_code, valor, modo="aplicar",
                           continuar_grupo=False, primero_de_grupo_multiple=False):
@@ -1515,131 +1560,145 @@ def cargar_tarifa_option(driver, service_code, supplier, location, service_type,
     time.sleep(4 * VELOCIDAD)
     ss(driver, f"rates_lista_{service_code}")
 
-    PC     = (price_code or PRICE_CODE_DEFAULT or "").strip().upper()
-    IS_ALL = PC in ("", "ALL", "TODOS", "*", "UNASSIGNED")
-
-    def _sel_pc(etq):
-        if not IS_ALL:
-            _seleccionar_price_code(driver, PC, etiqueta=etq)
-
-    _sel_pc(f"lista {service_code}")
-    time.sleep(1.5)
-
-    def _leer_periodos():
-        return driver.execute_script("""
-            var out = [];
-            document.querySelectorAll('td.tpcol-rateperiod').forEach(function(d){
-                var tr = d.closest('tr');
-                var p = tr ? tr.querySelector('td.tpcol-pricecodecode') : null;
-                out.push({date:(d.innerText||'').trim(),
-                          pc:(p?(p.innerText||'').trim():'')});
-            });
-            return out;
-        """)
-
-    rf, rt = parsear_fecha(rate_from_str), parsear_fecha(rate_to_str)
-    if not (rf and rt):
-        raise Exception(f"Fechas de período inválidas: '{rate_from_str}' / '{rate_to_str}'")
-    PC_VACIOS = ("", "—", "-", "UNASSIGNED", "ALL")
-
-    def _idx_periodo(rows):
-        for i, r in enumerate(rows):
-            pf, pt = _parse_rate_period(r["date"])
-            if not (pf and pt and abs((pf - rf).days) <= 2 and abs((pt - rt).days) <= 2):
-                continue
-            pc_row = (r["pc"] or "").strip().upper()
-            if IS_ALL:
-                if pc_row in PC_VACIOS: return i
-            elif pc_row == PC:
-                return i
-        return None
-
-    periodos    = _leer_periodos()
-    idx_periodo = _idx_periodo(periodos)
-    etq_pc      = "ALL/Unassigned" if IS_ALL else PC
-    print(f"    Períodos: {len(periodos)}  → {'encontrado' if idx_periodo is not None else 'NO encontrado'} "
-          f"{etq_pc} {fmt_tp(rf)}–{fmt_tp(rt)}")
-
-    if idx_periodo is None and modo == "lectura":
-        print(f"    (lectura) No existe el período → se crearía copiando el último")
-        return {"periodo_existia": False, "valor_actual": None, "etiqueta_fila": None}
-
-    pc_warning    = ""
-    ya_en_detalle = False
-    periodo_encontrado = f"{fmt_tp(rf)}–{fmt_tp(rt)}"
-    if idx_periodo is None:
-        print(f"    No hay período {etq_pc} para {fmt_tp(rf)}–{fmt_tp(rt)} → COPY último período")
-        pc_warning, ya_en_detalle = _copiar_ultimo_period(
-            driver, rf, rt, service_code, "" if IS_ALL else PC)
-        ss(driver, f"rates_creado_{service_code}")
-        if not ya_en_detalle:
-            _sel_pc(f"post-insert {service_code}")
-            time.sleep(1.5)
-            periodos    = _leer_periodos()
-            idx_periodo = _idx_periodo(periodos)
-            if idx_periodo is None:
-                raise Exception(
-                    f"El período {etq_pc} {fmt_tp(rf)}–{fmt_tp(rt)} no aparece "
-                    f"en la lista de rates de {service_code} tras crearlo.")
-
-    if not ya_en_detalle:
-        periodo_encontrado = periodos[idx_periodo]["date"]
-        filas_td = driver.find_elements(By.CSS_SELECTOR, "td.tpcol-rateperiod")
-        jc(driver, filas_td[idx_periodo])
-        time.sleep(5 * VELOCIDAD)
-        ss(driver, f"rates_detalle_{service_code}")
-    _sel_pc(f"escribir {service_code}")
-
-    if modo == "lectura":
-        etiqueta, valor_actual = _leer_primera_fila_valor(driver)
-        print(f"    (lectura) Valor actual en '{etiqueta}': {valor_actual}  (se cargaría {valor})")
-        return {"periodo_existia": True, "valor_actual": valor_actual, "etiqueta_fila": etiqueta}
-
-    valor_viejo, valor_nuevo, etiqueta_fila = _escribir_valor_unico(driver, valor, service_code)
-
-    # ── Verificación post-SAVE ─────────────────────────────────
-    error_post = ""
     try:
-        hamburger(driver)
-        menu_item(driver, "RATES")
-        time.sleep(4 * VELOCIDAD)
-        periodos_v = _leer_periodos()
-        idx_v      = _idx_periodo(periodos_v)
-        if idx_v is None:
-            ss(driver, f"verif_sin_periodo_{service_code[:10]}")
-            error_post = f"Verificación post-SAVE: el período {periodo_encontrado} no aparece al recargar RATES"
-        else:
+        PC     = (price_code or PRICE_CODE_DEFAULT or "").strip().upper()
+        IS_ALL = PC in ("", "ALL", "TODOS", "*", "UNASSIGNED")
+
+        def _sel_pc(etq):
+            if not IS_ALL:
+                _seleccionar_price_code(driver, PC, etiqueta=etq)
+
+        _sel_pc(f"lista {service_code}")
+        time.sleep(1.5)
+
+        def _leer_periodos():
+            return driver.execute_script("""
+                var out = [];
+                document.querySelectorAll('td.tpcol-rateperiod').forEach(function(d){
+                    var tr = d.closest('tr');
+                    var p = tr ? tr.querySelector('td.tpcol-pricecodecode') : null;
+                    out.push({date:(d.innerText||'').trim(),
+                              pc:(p?(p.innerText||'').trim():'')});
+                });
+                return out;
+            """)
+
+        rf, rt = parsear_fecha(rate_from_str), parsear_fecha(rate_to_str)
+        if not (rf and rt):
+            raise Exception(f"Fechas de período inválidas: '{rate_from_str}' / '{rate_to_str}'")
+        PC_VACIOS = ("", "—", "-", "UNASSIGNED", "ALL")
+
+        def _idx_periodo(rows):
+            for i, r in enumerate(rows):
+                pf, pt = _parse_rate_period(r["date"])
+                if not (pf and pt and abs((pf - rf).days) <= 2 and abs((pt - rt).days) <= 2):
+                    continue
+                pc_row = (r["pc"] or "").strip().upper()
+                if IS_ALL:
+                    if pc_row in PC_VACIOS: return i
+                elif pc_row == PC:
+                    return i
+            return None
+
+        periodos    = _leer_periodos()
+        idx_periodo = _idx_periodo(periodos)
+        etq_pc      = "ALL/Unassigned" if IS_ALL else PC
+        print(f"    Períodos: {len(periodos)}  → {'encontrado' if idx_periodo is not None else 'NO encontrado'} "
+              f"{etq_pc} {fmt_tp(rf)}–{fmt_tp(rt)}")
+
+        if idx_periodo is None and modo == "lectura":
+            print(f"    (lectura) No existe el período → se crearía copiando el último")
+            return {"periodo_existia": False, "valor_actual": None, "etiqueta_fila": None}
+
+        pc_warning    = ""
+        ya_en_detalle = False
+        periodo_encontrado = f"{fmt_tp(rf)}–{fmt_tp(rt)}"
+        if idx_periodo is None:
+            print(f"    No hay período {etq_pc} para {fmt_tp(rf)}–{fmt_tp(rt)} → COPY último período")
+            pc_warning, ya_en_detalle = _copiar_ultimo_period(
+                driver, rf, rt, service_code, "" if IS_ALL else PC)
+            ss(driver, f"rates_creado_{service_code}")
+            if not ya_en_detalle:
+                _sel_pc(f"post-insert {service_code}")
+                time.sleep(1.5)
+                periodos    = _leer_periodos()
+                idx_periodo = _idx_periodo(periodos)
+                if idx_periodo is None:
+                    raise Exception(
+                        f"El período {etq_pc} {fmt_tp(rf)}–{fmt_tp(rt)} no aparece "
+                        f"en la lista de rates de {service_code} tras crearlo.")
+
+        if not ya_en_detalle:
+            periodo_encontrado = periodos[idx_periodo]["date"]
             filas_td = driver.find_elements(By.CSS_SELECTOR, "td.tpcol-rateperiod")
-            jc(driver, filas_td[idx_v])
+            jc(driver, filas_td[idx_periodo])
             time.sleep(5 * VELOCIDAD)
-            _sel_pc(f"verif {service_code}")
+            ss(driver, f"rates_detalle_{service_code}")
+        _sel_pc(f"escribir {service_code}")
 
-            leido = None
-            for intento in range(1, 4):
-                _, leido = _leer_primera_fila_valor(driver)
-                if leido is not None and abs(leido - valor_nuevo) <= 0.011:
-                    break
-                if intento < 3:
-                    print(f"    ⚠ Verificación post-SAVE: leído {leido}, esperado {valor_nuevo} "
-                          f"(intento {intento}/3) — reintentando...")
-                    time.sleep(2 * VELOCIDAD)
+        if modo == "lectura":
+            etiqueta, valor_actual = _leer_primera_fila_valor(driver)
+            print(f"    (lectura) Valor actual en '{etiqueta}': {valor_actual}  (se cargaría {valor})")
+            return {"periodo_existia": True, "valor_actual": valor_actual, "etiqueta_fila": etiqueta}
 
-            if leido is None or abs(leido - valor_nuevo) > 0.011:
-                ss(driver, f"verif_error_{service_code[:10]}")
-                dump(driver, f"verif_error_{service_code[:10]}")
-                error_post = f"El valor NO quedó guardado en {service_code}: esperado {valor_nuevo}, leído {leido}"
+        valor_viejo, valor_nuevo, etiqueta_fila = _escribir_valor_unico(driver, valor, service_code)
+
+        # ── Verificación post-SAVE ─────────────────────────────────
+        error_post = ""
+        try:
+            hamburger(driver)
+            menu_item(driver, "RATES")
+            time.sleep(4 * VELOCIDAD)
+            periodos_v = _leer_periodos()
+            idx_v      = _idx_periodo(periodos_v)
+            if idx_v is None:
+                ss(driver, f"verif_sin_periodo_{service_code[:10]}")
+                error_post = f"Verificación post-SAVE: el período {periodo_encontrado} no aparece al recargar RATES"
             else:
-                print(f"    ✔ Verificación post-SAVE OK: {leido}")
-                ss(driver, f"verif_ok_{service_code[:10]}")
-    except Exception as _ve:
-        error_post = f"Verificación post-SAVE falló: {_ve}"
+                filas_td = driver.find_elements(By.CSS_SELECTOR, "td.tpcol-rateperiod")
+                jc(driver, filas_td[idx_v])
+                time.sleep(5 * VELOCIDAD)
+                _sel_pc(f"verif {service_code}")
 
-    if error_post:
-        raise Exception(error_post)
+                leido = None
+                for intento in range(1, 4):
+                    _, leido = _leer_primera_fila_valor(driver)
+                    if leido is not None and abs(leido - valor_nuevo) <= 0.011:
+                        break
+                    if intento < 3:
+                        print(f"    ⚠ Verificación post-SAVE: leído {leido}, esperado {valor_nuevo} "
+                              f"(intento {intento}/3) — reintentando...")
+                        time.sleep(2 * VELOCIDAD)
 
-    return {"periodo_existia": periodo_encontrado != f"{fmt_tp(rf)}–{fmt_tp(rt)}" or not ya_en_detalle,
-            "valor_viejo": valor_viejo, "valor_nuevo": valor_nuevo,
-            "etiqueta_fila": etiqueta_fila, "pc_warning": pc_warning}
+                if leido is None or abs(leido - valor_nuevo) > 0.011:
+                    ss(driver, f"verif_error_{service_code[:10]}")
+                    dump(driver, f"verif_error_{service_code[:10]}")
+                    error_post = f"El valor NO quedó guardado en {service_code}: esperado {valor_nuevo}, leído {leido}"
+                else:
+                    print(f"    ✔ Verificación post-SAVE OK: {leido}")
+                    ss(driver, f"verif_ok_{service_code[:10]}")
+        except Exception as _ve:
+            error_post = f"Verificación post-SAVE falló: {_ve}"
+
+        if error_post:
+            raise Exception(error_post)
+
+        return {"periodo_existia": periodo_encontrado != f"{fmt_tp(rf)}–{fmt_tp(rt)}" or not ya_en_detalle,
+                "valor_viejo": valor_viejo, "valor_nuevo": valor_nuevo,
+                "etiqueta_fila": etiqueta_fila, "pc_warning": pc_warning}
+    finally:
+        # Necesario para que el atajo de la lupa de la FILA SIGUIENTE
+        # encuentre el popover de búsqueda como el diálogo correcto: sin
+        # este cierre, la ventana de valorización del period recién
+        # editado (abierta dentro de un tp-dialog, ver _escribir_valor_unico)
+        # queda sin cerrar, y _saltar_a_producto_via_lupa() terminaba
+        # operando sobre ESE diálogo viejo en vez del popover nuevo
+        # (confirmado por la usuaria en corrida real: patrón OK/ERROR
+        # alternado fila por fila, 2026-10-01). Se ejecuta pase lo que
+        # pase (éxito, lectura, o cualquier excepción/raise de arriba),
+        # para que la fila siguiente —tome o no el atajo— arranque
+        # siempre con el diálogo de la fila anterior ya cerrado.
+        _cerrar_ventana_valorizacion(driver)
 
 
 # ── Sheet: cola de trabajo (ver skill armando-excel-como-cola-de-trabajo) ──
