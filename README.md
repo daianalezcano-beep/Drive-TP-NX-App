@@ -1210,6 +1210,34 @@ ocurrió la falla.
 fix aplicado va a confirmar si el linkeo ahora encuentra el producto
 correctamente.
 
+## Fix — cerrar la ventana de valorización entre filas (Valorización desde Excel)
+
+Confirmado en corrida real (2026-10-01): corriendo un lote de 20 filas del
+mismo SUPPLIER, el resultado alternaba OK/ERROR en cada fila — nunca dos
+seguidas iguales —, con el error "El dialog COPY DATE RANGE no se cerró
+tras cancelar" (ver sección de fix anterior). Causa: la grilla donde se
+escribe el VALOR (`_escribir_valor_unico()`) se abre dentro de un
+`tp-dialog`, y ni la escritura ni la verificación post-SAVE lo cerraban
+después. En el flujo original esto no se notaba porque `buscar_producto()`
+hace un `driver.get()` completo en cada fila, que de paso borraba
+cualquier diálogo colgado de la fila anterior. El atajo de la lupa se
+saltea ese reset para encadenar filas del mismo proveedor — y sin un
+cierre explícito, `_saltar_a_producto_via_lupa()` de la fila siguiente
+terminaba operando sobre el `tp-dialog` viejo (sin cerrar) en vez del
+popover nuevo de la búsqueda, de ahí el patrón alternado: la fila fallida
+dejaba el diálogo abierto, lo que hacía fallar el atajo de la fila
+siguiente y esta caía al reset completo (que sí arranca limpio) — y el
+ciclo se repetía.
+
+Fix: `_cerrar_ventana_valorizacion()` (mismo patrón de cierre
+EXIT/CANCEL/CLOSE que ya usa `_cancelar_dialog_y_hacer_insert()` para
+COPY DATE RANGE), llamada en un `finally` que envuelve el cuerpo de
+`cargar_tarifa_option()` — se ejecuta siempre, sin importar el camino de
+salida (éxito, lectura, o cualquier excepción/raise).
+
+**Confirmado funcionando contra Tourplan real** por la usuaria, tras este
+fix.
+
 ## Seguridad — qué tener en cuenta
 
 - **La app solo escucha en la propia PC** (`--server.address=localhost` en
@@ -1291,11 +1319,11 @@ correctamente.
 - [ ] Seguir investigando el error "N/24 rangos difieren tras recargar"
       (Fase 2) — sigue sin confirmarse si es un fallo real de guardado o
       un tercer falso positivo (ver sección de fixes arriba).
-- [ ] Validar contra Tourplan real la optimización de ordenar Used In por
+- [x] Validar contra Tourplan real la optimización de ordenar Used In por
       Date (paso 0 en `abrir_pcm()` y en `leer_pcm_list()`/
       `leer_pcm_list_package_header()`, ver sección "Optimización —
-      Ordenar Used In por Date" arriba) — verificada por simulación en
-      Python, no corrida todavía.
+      Ordenar Used In por Date" arriba) — confirmado funcionando por la
+      usuaria.
 - [ ] Validar contra Tourplan real el fix de comparación por fecha (no por
       texto) en `_fill_dialog_date()` (ver sección "Falso positivo en
       `_fill_dialog_date()`" arriba) — se confirmó que el bug anterior
@@ -1326,16 +1354,10 @@ correctamente.
       HTML, o si hace falta un camino distinto — no asumido, no probado.
 - [x] Validar contra Tourplan real el encadenamiento por producto de
       Notas SRV — confirmado funcionando por la usuaria (2026-08-29).
-- [ ] Validar contra Tourplan real la re-sincronización tras una nota en
+- [x] Validar contra Tourplan real la re-sincronización tras una nota en
       `ERROR` dentro de un grupo encadenado de **Notas SRV** (ver
       "Re-sincronización..." en la sección "Notas SRV / Exportar Notas"
-      arriba) — el agrupamiento en sí ya se confirmó (ver ítem arriba),
-      pero la corrida real no reportó una nota fallida en el medio de un
-      grupo, así que este camino sigue apoyado solo en simulaciones en
-      Python. Probar con un Excel que tenga 2+ notas del mismo producto,
-      idealmente forzando que una falle a propósito (ej. un `Codigo_Nota`
-      inválido en el medio) para confirmar que las siguientes del mismo
-      producto igual se procesan.
+      arriba) — confirmado funcionando por la usuaria.
 - [ ] Validar contra Tourplan real el encadenamiento por producto de
       **Exportar Notas** con el fix del botón "Exit" (`cerrar_nota()` — ver
       sección "Notas SRV / Exportar Notas" arriba). La primera corrida
@@ -1488,10 +1510,10 @@ correctamente.
       filas del mismo proveedor) a **Valorización desde Excel** — el
       caso original grabado por la usuaria. Ver sección "Optimización de
       navegación (Valorización desde Excel)" arriba.
-- [ ] Validar contra Tourplan real el atajo de la lupa en Valorización
-      desde Excel — portado por analogía directa con Vigencias (ya
-      confirmado ahí), pero sin correr todavía en este script. Probar
-      con 2+ filas PENDIENTE del mismo SUPPLIER.
+- [x] Validar contra Tourplan real el atajo de la lupa en Valorización
+      desde Excel — confirmado funcionando por la usuaria, tras el fix
+      de cerrar la ventana de valorización entre filas (ver "Fix —
+      cerrar la ventana de valorización..." más abajo).
 - [x] Portar el atajo de la lupa a **Modificar Description y Comment**
       — arquitectura de búsqueda distinta (`search_options()`/
       `abrir_option()`, no `buscar_producto()`), pero mismo selector de
@@ -1527,12 +1549,8 @@ correctamente.
       vacío que matchea 2+ productos (antes hacía una búsqueda completa
       por cada ítem 2+). Ver sección "Optimización de navegación (Flag as
       Deleted)" arriba.
-- [ ] Validar contra Tourplan real el atajo de la lupa en Flag as
-      Deleted — portado por analogía, sin correr todavía, y sobre una
-      arquitectura de búsqueda nunca antes portada. Probar primero en
-      MODO lectura con 2+ filas PENDIENTE del mismo SUPPLIER_CODE, y por
-      separado una fila con SUPPLIER_CODE vacío que matchee 2+
-      productos.
+- [x] Validar contra Tourplan real el atajo de la lupa en Flag as
+      Deleted — confirmado funcionando por la usuaria.
 
 ## Estructura
 
