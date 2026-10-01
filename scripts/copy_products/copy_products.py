@@ -256,7 +256,6 @@ def crear_driver():
     # PC de la persona, a diferencia del contenedor sin pantalla de Colab.
     if HEADLESS:
         opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1704,1012")
     opts.add_argument("--disable-gpu")

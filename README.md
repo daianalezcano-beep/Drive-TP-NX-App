@@ -1258,9 +1258,9 @@ fix.
   limpieza manual periódica si eso importa.
 - **`--no-sandbox` en Chrome:** heredado de los scripts originales de Colab
   (necesario ahí porque corre como root en un contenedor). En una PC Windows
-  normal no hace falta y reduce una capa de aislamiento de Chrome. Pendiente
-  de sacar — no se hizo todavía para no tener que re-validar los scripts que
-  ya andan.
+  normal no hace falta y reduce una capa de aislamiento de Chrome — sacado
+  de los 11 scripts. Pendiente de validar que Chrome sigue abriendo bien
+  en una corrida real tras el cambio.
 - **Nada de esto es exclusivo de esta app:** el riesgo de fondo (automatizar
   cambios reales en producción con Selenium) ya existía con los scripts de
   Colab — la app no lo aumenta, solo lo hace más visible (con avisos de modo
@@ -1456,9 +1456,11 @@ fix.
       verificación y reintentos. El fix en sí todavía no se re-probó —
       confirmar en una corrida real que "Update Exchange Rates" termina
       tildado al cerrar el diálogo de recálculo.
-- [ ] Sacar `--no-sandbox` de Chrome en los 6 scripts (innecesario en
-      Windows, pospuesto para no forzar una re-validación — ver sección
-      Seguridad).
+- [x] Sacar `--no-sandbox` de Chrome en los 11 scripts (innecesario en
+      Windows — ver sección Seguridad).
+- [ ] Validar contra Tourplan real que Chrome sigue abriendo bien tras
+      sacar `--no-sandbox` — cambio de bajo riesgo esperado, pero sin
+      correr todavía en ningún script.
 - [ ] Empaquetar como ejecutable de Windows (evaluando PyInstaller) para que
       el equipo no técnico abra la app con doble clic sin instalar Python.
 - [ ] Optimización de navegación pendiente (idea de la usuaria, 2026-09-24,
