@@ -83,7 +83,7 @@ ELIMINAR_NO_SI = [
 
 SCRIPTS = {
     "copy_products": {
-        "label": "Copy Products (05)",
+        "label": "Copy Products (01)",
         "category": "Productos",
         # Reemplaza a los copy_products/rename_products viejos (eliminados).
         # Fuente: https://github.com/daianalezcano-beep/Copy-products/tree/claude/new-option-copy-script-25yt7w
@@ -94,7 +94,7 @@ SCRIPTS = {
         "modo_options": MODO_COPY_PRODUCTS,
     },
     "flag_as_deleted": {
-        "label": "Flag as Deleted (10)",
+        "label": "Flag as Deleted (02)",
         "category": "Productos",
         "help": "Marca productos como \"Flag Product as Deleted\" en Tourplan.",
         "script_path": REPO_ROOT / "scripts" / "flag_as_deleted" / "flag_products_as_deleted.py",
@@ -104,7 +104,7 @@ SCRIPTS = {
         "eliminar_options": ELIMINAR_NO_SI,
     },
     "modificar_description_comment": {
-        "label": "Modificar Description y Comment (15)",
+        "label": "Modificar Description y Comment (03)",
         "category": "Productos",
         # Fuente: https://github.com/daianalezcano-beep/Copy-products/tree/claude/nuevo-branch-repositorio-p32d22
         "help": "Modifica los campos description y/o comment de un producto en Tourplan.",
@@ -114,7 +114,7 @@ SCRIPTS = {
         "modo_options": MODO_LECTURA_ESCRITURA,
     },
     "copy_pcm_linkeo": {
-        "label": "Copy y Linkeo PCM (20)",
+        "label": "Copy y Linkeo PCM (10)",
         "category": "PCM",
         "help": "Copia un PCM (Package Header) desde un servicio madre y lo linkea a un product code nuevo.",
         "script_path": REPO_ROOT / "scripts" / "copy_pcm_linkeo" / "tourplan_copiar_pcm.py",
@@ -122,7 +122,7 @@ SCRIPTS = {
         "sheet": "PRODUCTOS",
     },
     "valorizacion_pkg": {
-        "label": "Valorización desde Componente (25)",
+        "label": "Valorización desde Componente (20)",
         "category": "Valorización",
         "help": "Valoriza servicios madre PKG a partir de un componente (COD ORIGEN): lee costos de los PCM hijos y escribe las tarifas en el servicio madre.",
         "script_path": REPO_ROOT / "scripts" / "valorizacion_pkg" / "tourplan_valorizacion_pkg_v3.py",
@@ -131,7 +131,7 @@ SCRIPTS = {
         "modo_options": MODO_FASES,
     },
     "valorizacion_madre": {
-        "label": "Valorización desde Servicio Madre (30)",
+        "label": "Valorización desde Servicio Madre (21)",
         "category": "Valorización",
         "help": "Valoriza servicios madre PKG partiendo directo del servicio madre (sin componente): busca sus PCM tipo \"Package Header\" y aplica las tarifas.",
         "script_path": REPO_ROOT / "scripts" / "valorizacion_madre" / "valorizacion_desde_madre.py",
@@ -140,7 +140,7 @@ SCRIPTS = {
         "modo_options": MODO_FASES,
     },
     "valorizacion_excel": {
-        "label": "Valorización desde Excel (35)",
+        "label": "Valorización desde Excel (22)",
         "category": "Valorización",
         # Fuente: https://github.com/daianalezcano-beep/Valorizacion-EX-TF-dsd-servicio-madre/tree/claude/nuevo-script-471bvm
         "help": "Valoriza servicios con un solo pax break, desde un valor cargado en el excel.",
@@ -150,7 +150,7 @@ SCRIPTS = {
         "modo_options": MODO_LECTURA_ESCRITURA,
     },
     "valorizacion_madre_numericos": {
-        "label": "Valorización Tarifario estático (40)",
+        "label": "Valorización Tarifario estático (23)",
         "category": "Valorización",
         "help": "Variante de \"Valorización desde Servicio Madre\" con el filtro de códigos invertido: procesa únicamente los servicios madre PKG cuyo código empieza con un número (los que ese script descarta). Busca sus PCM tipo \"Package Header\" y aplica las tarifas.",
         "script_path": REPO_ROOT / "scripts" / "valorizacion_madre_numericos" / "valorizacion_desde_madre_numericos.py",
@@ -158,8 +158,18 @@ SCRIPTS = {
         "sheet": "PRODUCTOS",
         "modo_options": MODO_FASES,
     },
+    "modificar_rate_name_text": {
+        "label": "Modificar Rate Text / Rate Name (24)",
+        "category": "Valorización",
+        # Fuente: https://github.com/daianalezcano-beep/Tourplan-Valorizacion-EX-TF
+        "help": "Modifica el Rate Name y/o el Rate Text de tarifas existentes, identificando el período (vigencia) y el price code dentro de la grilla de RATES del producto.",
+        "script_path": REPO_ROOT / "scripts" / "modificar_rate_name_text" / "modificar_rate_name_text.py",
+        "base_url": PRODUCCION_URL,
+        "sheet": "Datos",
+        "modo_options": MODO_LECTURA_ESCRITURA,
+    },
     "notas_srv": {
-        "label": "Crear/Modificar (45)",
+        "label": "Crear/Modificar (30)",
         "category": "Notas",
         # Fuente: https://github.com/daianalezcano-beep/copy-products/tree/notas-SRV
         "help": "Inserta/edita notas Plain Text (Product Notes) en productos de Tourplan NX: Nota SRV, Descriptivo, Luggage Waiver, Título y otros 25 códigos confirmados. No pisa notas existentes salvo que se pida explícitamente.",
@@ -170,7 +180,7 @@ SCRIPTS = {
         "edicion_options": EDICION_NO_SI,
     },
     "exportar_notas": {
-        "label": "Exportar (50)",
+        "label": "Exportar (31)",
         "category": "Notas",
         # Fuente: https://github.com/daianalezcano-beep/copy-products/tree/notas-SRV
         "help": "Exporta a una columna del Excel el contenido de una nota (Product Notes) ya existente en un producto. El código de nota no está limitado a una lista fija.",
@@ -180,7 +190,7 @@ SCRIPTS = {
         "no_modo_info": "ℹ️ Este script es de solo lectura: exporta el contenido de la nota indicada a la columna Texto_Exportado del Excel, sin insertar, editar ni guardar nada en Tourplan.",
     },
     "extraccion_vigencias": {
-        "label": "Vigencias (55)",
+        "label": "Vigencias (40)",
         "category": "Relevamiento",
         # Fuente: https://github.com/daianalezcano-beep/generico-vs-especificos/tree/claude/rates-extraction-script-lm4tyn
         "help": "Relevamiento de vigencias: dado un supplier/location/service type (o código puntual), exporta el estado de los períodos de RATES de cada producto (fechas, Price Code, moneda, estado) sin leer costos. Sirve para detectar tarifas vencidas o sin cargar.",
