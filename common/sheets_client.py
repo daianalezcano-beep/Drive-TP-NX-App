@@ -100,6 +100,12 @@ def actualizar_fila_sheet(ws, row_idx, columnas, valores):
     batch_update. Columnas que no existen en el Sheet se ignoran en
     silencio.
 
+    Si row_idx cae fuera de la grilla actual de la hoja (confirmado en
+    corrida real: una hoja de solo-agregar como VIGENCIAS llega al
+    límite default de 1000 filas de una pestaña nueva de Sheets y la
+    API devuelve "Range ... exceeds grid limits"), se agranda la hoja
+    antes de escribir — por default gspread nunca hace esto solo.
+
     valores: dict {nombre_de_columna: valor}
     """
     updates = []
@@ -109,6 +115,8 @@ def actualizar_fila_sheet(ws, row_idx, columnas, valores):
         col_idx = columnas.index(nombre_columna) + 1
         updates.append({"range": rowcol_to_a1(row_idx, col_idx), "values": [[valor]]})
     if updates:
+        if row_idx > ws.row_count:
+            ws.add_rows(row_idx - ws.row_count)
         ws.batch_update(updates)
 
 
