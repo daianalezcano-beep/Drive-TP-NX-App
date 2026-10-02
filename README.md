@@ -77,6 +77,17 @@ siguen valiendo aunque ya no se muestren como advertencia en la UI:
   (2026-08-29)**. Es de solo lectura: nunca inserta, edita ni guarda nada
   en Tourplan.
 
+- **Modificar Rate Text / Rate Name (24)** es una entrada nueva de la
+  categoría "Valorización", vendorizada desde el repo
+  `Tourplan-Valorizacion-EX-TF`. Además de los dos ajustes de entorno de
+  siempre (variables de entorno, Chrome multiplataforma), cambia la cola
+  de trabajo de un Excel local de Colab a una hoja **`Datos`** de Google
+  Sheets (columnas `Location`, `Supplier`, `Service Type`, `Codigo`,
+  `Fecha Desde`, `Fecha Hasta`, `Price Code`, `Nuevo Rate Name`,
+  `Nuevo Rate Text`, `ESTADO`, `OBSERVACIONES`) y suma abort entre filas.
+  La lógica de automatización no se tocó. En el repo origen ya está
+  validado contra Test; **todavía sin correr desde esta app**.
+
 600BOX Creator se descartó del alcance (era una prueba de lo que fue Rename
 Products, luego absorbido por la versión nueva de Copy Products). Los repos
 originales (Copy-products, Flag-as-deleted, Copy-PCM-Linkeo,
