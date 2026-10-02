@@ -195,9 +195,15 @@ SCRIPTS = {
 def _clasificar_estado(valor):
     """Agrupa el valor crudo de la columna ESTADO (que en varios scripts
     incluye el detalle del error, ej. "ERROR: Faltan campos...") en un
-    puñado de categorías fijas para poder contarlas."""
+    puñado de categorías fijas para poder contarlas.
+
+    Una celda VACÍA no cuenta como "Pendiente": ningún script la toma
+    como tal (su propio leer_pendientes()/filtro exige el valor literal
+    PENDIENTE/PENDING/PEND, nunca una celda en blanco) — contarla acá
+    como pendiente inflaba el contador con filas que el script de verdad
+    nunca iba a procesar. Cae en "Otro"."""
     v = (valor or "").strip().upper()
-    if not v or v in ("PENDIENTE", "PENDING", "PEND"):
+    if v in ("PENDIENTE", "PENDING", "PEND"):
         return "Pendiente"
     if v == "PROCESANDO":
         return "En proceso"
@@ -354,7 +360,11 @@ def render_script_tab(key, cfg):
 
         total = sum(conteo.values())
         if total > 0:
-            avanzadas = total - conteo["Pendiente"]
+            # OK + Error + En proceso, no "total - Pendiente": con celdas
+            # ESTADO vacías contando ahora como "Otro" (ver
+            # _clasificar_estado), "total - Pendiente" las contaría como
+            # procesadas sin haberlo sido.
+            avanzadas = conteo["OK"] + conteo["Error"] + conteo["En proceso"]
             st.progress(
                 avanzadas / total,
                 text=f"{avanzadas}/{total} procesadas",
