@@ -39,7 +39,20 @@ PRODUCCION_URL = "https://tourplannx.eurotur.com.ar/tourplannx"
 # modo_options: lista de (etiqueta visible, valor real que se manda como
 # TOURPLAN_MODO). La primera opción es siempre la más segura (default del
 # radio). Si un script no tiene modo de solo lectura, se omite esta clave.
+#
+# MODO_LECTURA_ESCRITURA es genérico a propósito — lo comparten varios
+# scripts (Copy Products, Modificar Description y Comment, Valorización
+# desde Excel, Notas SRV) que no tienen nada que ver entre sí más que el
+# patrón lectura/aplicar, así que el texto no puede nombrar una acción
+# puntual (antes decía "copia los productos", que solo es cierto para
+# Copy Products y aparecía igual en los otros 3). Copy Products usa su
+# propia variante de abajo con el detalle específico.
 MODO_LECTURA_ESCRITURA = [
+    ("Solo revisar (lectura, no modifica nada)", "lectura"),
+    ("Aplicar cambios", "completo"),
+]
+
+MODO_COPY_PRODUCTS = [
     ("Solo revisar (lectura, no modifica nada)", "lectura"),
     ("Aplicar cambios (copia los productos)", "completo"),
 ]
@@ -78,7 +91,7 @@ SCRIPTS = {
         "script_path": REPO_ROOT / "scripts" / "copy_products" / "copy_products.py",
         "base_url": PRODUCCION_URL,
         "sheet": "PRODUCTOS",
-        "modo_options": MODO_LECTURA_ESCRITURA,
+        "modo_options": MODO_COPY_PRODUCTS,
     },
     "flag_as_deleted": {
         "label": "Flag as Deleted (10)",
