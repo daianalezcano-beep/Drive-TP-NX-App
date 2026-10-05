@@ -1249,6 +1249,29 @@ salida (éxito, lectura, o cualquier excepción/raise).
 **Confirmado funcionando contra Tourplan real** por la usuaria, tras este
 fix.
 
+## Fix — falso error "no se cerró (EXIT)" cuando el período nuevo ya tenía los valores correctos (Valorización desde Servicio Madre, Fase 2)
+
+Reportado por la usuaria en corrida real (2026-10-05): al crear un período
+nuevo copiando uno anterior (COPY DATE RANGE) cuyos valores resultan ser
+los MISMOS que hay que cargar, `_escribir_rates()` ya detecta "sin
+cambios" y no hace ningún SAVE (comportamiento correcto — no hay nada que
+guardar). Pero la verificación post-SAVE de `actualizar_rates_servicio_madre()`
+igual intenta cerrar el detalle del período con EXIT y, si Tourplan no
+tiene nada que confirmar/cerrar en ese caso, reportaba error
+("el detalle del período ... no se cerró (EXIT) tras el SAVE") aun cuando
+las tarifas ya estaban correctas en la grilla — un falso positivo, no un
+fallo real de guardado.
+
+Fix: cuando `_cerrar_ultimo_tp_dialog()` devuelve que no pudo cerrar el
+diálogo, antes de reportar error se relee la grilla todavía abierta y se
+compara contra los valores esperados (mismo criterio de tolerancia que ya
+usa la verificación posterior cuando el cierre sí funciona) — si
+coinciden, se da la fila por OK sin error.
+
+**Sin correr todavía contra Tourplan real** — portado directo del caso
+reportado, falta confirmar con una corrida nueva que el período que antes
+daba error ahora queda OK.
+
 ## Seguridad — qué tener en cuenta
 
 - **La app solo escucha en la propia PC** (`--server.address=localhost` en
@@ -1330,6 +1353,11 @@ fix.
 - [ ] Seguir investigando el error "N/24 rangos difieren tras recargar"
       (Fase 2) — sigue sin confirmarse si es un fallo real de guardado o
       un tercer falso positivo (ver sección de fixes arriba).
+- [ ] Validar contra Tourplan real el fix del falso error "no se cerró
+      (EXIT)" cuando el período nuevo ya tenía los valores correctos
+      (Valorización desde Servicio Madre, Fase 2 — ver sección de fixes
+      arriba) — portado directo del caso reportado por la usuaria, sin
+      correr todavía.
 - [x] Validar contra Tourplan real la optimización de ordenar Used In por
       Date (paso 0 en `abrir_pcm()` y en `leer_pcm_list()`/
       `leer_pcm_list_package_header()`, ver sección "Optimización —

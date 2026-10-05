@@ -3012,8 +3012,27 @@ def actualizar_rates_servicio_madre(driver, service_code, supplier,
         cerrado = _cerrar_ultimo_tp_dialog(driver)
         if not cerrado:
             ss(driver, f"verif_dialog_no_cerro_{service_code[:10]}")
-            error_post = (f"Verificación post-SAVE: el detalle del período "
-                          f"{periodo_encontrado} no se cerró (EXIT) tras el SAVE")
+            # Antes de reportar error, confirmar si las tarifas YA están
+            # correctas en la grilla todavía abierta (mismo criterio de
+            # tolerancia que la verificación post-cierre de más abajo):
+            # cuando el período se creó copiando uno anterior con los
+            # MISMOS valores, _escribir_rates() ya detecta "sin cambios" y
+            # no hace ningún SAVE — en ese caso es esperable que EXIT no
+            # tenga nada que cerrar/confirmar, no es un error real
+            # (confirmado por la usuaria en corrida real, 2026-10-05).
+            tabla_actual  = _leer_tabla_rates(driver)
+            leidos_actual = _extraer_valores_ad(tabla_actual) if tabla_actual else {}
+            difs_actual = [
+                rango for rango in rangos
+                if abs(float(leidos_actual.get(rango, 0) or 0)
+                       - float(v_nuevos.get(rango, 0) or 0)) > 0.011
+            ]
+            if tabla_actual and not difs_actual:
+                print(f"    ✅ El detalle no se cerró con EXIT, pero los {len(rangos)} "
+                      f"rangos AD ya están correctos en la grilla — se da por OK.")
+            else:
+                error_post = (f"Verificación post-SAVE: el detalle del período "
+                              f"{periodo_encontrado} no se cerró (EXIT) tras el SAVE")
         else:
             time.sleep(2 * VELOCIDAD)
             periodos_v  = _leer_periodos()
