@@ -209,6 +209,7 @@ SCRIPTS = {
         "script_path": REPO_ROOT / "scripts" / "exportar_notas" / "exportar_notas.py",
         "base_url": PRODUCCION_URL,
         "sheet": "EXPORTAR_NOTAS",
+        "sheet_resultados": "EXPORTAR_NOTAS_RESULTADOS",
         "no_modo_info": "ℹ️ Este script es de solo lectura: nunca inserta, edita ni guarda nada en Tourplan.",
         "notas_a_exportar": True,
     },
@@ -234,7 +235,12 @@ def _clasificar_estado(valor):
     como tal (su propio leer_pendientes()/filtro exige el valor literal
     PENDIENTE/PENDING/PEND, nunca una celda en blanco) — contarla acá
     como pendiente inflaba el contador con filas que el script de verdad
-    nunca iba a procesar. Cae en "Otro"."""
+    nunca iba a procesar. Cae en "Otro".
+
+    EXPORTADO/PARCIAL son el vocabulario propio de Exportar Notas (ESTADO
+    agregado por producto, no por fila de Tourplan como en los demás
+    scripts): EXPORTADO se cuenta como OK (se exportaron bien todas las
+    notas configuradas) y PARCIAL como Error (al menos una nota falló)."""
     v = (valor or "").strip().upper()
     if v in ("PENDIENTE", "PENDING", "PEND"):
         return "Pendiente"
@@ -244,6 +250,10 @@ def _clasificar_estado(valor):
         return "Error"
     if v == "OK" or v.startswith("OK "):
         return "OK"
+    if v == "EXPORTADO":
+        return "OK"
+    if v == "PARCIAL":
+        return "Error"
     return "Otro"
 
 
@@ -267,6 +277,39 @@ def _refrescar_conteo(state, sheet_url, hoja):
         return True
     except Exception as e:
         state["conteo_error"] = str(e)
+        return False
+
+
+def _clasificar_estado_nota(valor):
+    """Clasifica el ESTADO de una fila de EXPORTAR_NOTAS_RESULTADOS (una
+    fila por producto × nota exportada) — vocabulario propio, distinto al
+    de _clasificar_estado: EXPORTADA/NO EXISTE/ERROR: <detalle>."""
+    v = (valor or "").strip().upper()
+    if v == "EXPORTADA":
+        return "OK"
+    if v == "NO EXISTE" or v.startswith("ERROR"):
+        return "Error"
+    return "Otro"
+
+
+def _contar_estados_notas(filas):
+    conteo = {"OK": 0, "Error": 0, "Otro": 0}
+    for fila in filas:
+        conteo[_clasificar_estado_nota(fila.get("ESTADO"))] += 1
+    return conteo
+
+
+def _refrescar_conteo_notas(state, sheet_url, hoja):
+    """Igual que _refrescar_conteo pero para la hoja de resultados por
+    nota (EXPORTAR_NOTAS_RESULTADOS) — guarda en state["conteo_notas"]."""
+    try:
+        ws = conectar_sheets(
+            sheet_url, hoja, user_config.CREDENTIALS_PATH, user_config.TOKEN_PATH)
+        filas, _ = cargar_sheet(ws)
+        state["conteo_notas"] = _contar_estados_notas(filas)
+        return True
+    except Exception as e:
+        state["conteo_notas_error"] = str(e)
         return False
 
 
@@ -384,6 +427,8 @@ def render_script_tab(key, cfg):
 
     if refrescar_clicked:
         _refrescar_conteo(state, sheet_url, cfg["sheet"])
+        if cfg.get("sheet_resultados"):
+            _refrescar_conteo_notas(state, sheet_url, cfg["sheet_resultados"])
 
     if state.get("conteo"):
         conteo = state["conteo"]
@@ -404,6 +449,23 @@ def render_script_tab(key, cfg):
             )
     elif state.get("conteo_error"):
         st.error(f"No pude leer el Sheet: {state['conteo_error']}")
+
+    if cfg.get("sheet_resultados"):
+        if state.get("conteo_notas"):
+            conteo_notas = state["conteo_notas"]
+            st.caption("Notas exportadas (histórico acumulado en EXPORTAR_NOTAS_RESULTADOS):")
+            cols_notas = st.columns(3)
+            for col, (etiqueta, n) in zip(cols_notas, conteo_notas.items()):
+                col.metric(etiqueta, n)
+
+            total_notas = sum(conteo_notas.values())
+            if total_notas > 0:
+                st.progress(
+                    conteo_notas["OK"] / total_notas,
+                    text=f"{conteo_notas['OK']}/{total_notas} notas exportadas OK",
+                )
+        elif state.get("conteo_notas_error"):
+            st.error(f"No pude leer el histórico de notas: {state['conteo_notas_error']}")
 
     username, password = user_config.tp_credenciales_default()
     if not (username and password):
@@ -598,6 +660,8 @@ def render_script_tab(key, cfg):
         state["running"] = False
         rc = state["returncode"]
         _refrescar_conteo(state, sheet_url, cfg["sheet"])
+        if cfg.get("sheet_resultados"):
+            _refrescar_conteo_notas(state, sheet_url, cfg["sheet_resultados"])
 
         if rc == 0:
             st.success(f"Terminó OK (código de salida {rc}). Revisá el resultado en el Sheet.")
@@ -615,6 +679,8 @@ def render_script_tab(key, cfg):
     if state["running"]:
         if time.time() - state.get("conteo_ts", 0) > 5:
             _refrescar_conteo(state, sheet_url, cfg["sheet"])
+            if cfg.get("sheet_resultados"):
+                _refrescar_conteo_notas(state, sheet_url, cfg["sheet_resultados"])
         time.sleep(1)
         st.rerun()
 
