@@ -301,12 +301,15 @@ def _contar_estados_notas(filas):
 
 def _refrescar_conteo_notas(state, sheet_url, hoja):
     """Igual que _refrescar_conteo pero para la hoja de resultados por
-    nota (EXPORTAR_NOTAS_RESULTADOS) — guarda en state["conteo_notas"]."""
+    nota (EXPORTAR_NOTAS_RESULTADOS). Guarda las filas crudas (no un
+    conteo ya agregado): el conteo que de verdad importa es el de la
+    selección de notas vigente en la UI (ver render_script_tab), que acá
+    todavía no se conoce — eso filtra por Codigo_Nota al mostrarlo."""
     try:
         ws = conectar_sheets(
             sheet_url, hoja, user_config.CREDENTIALS_PATH, user_config.TOKEN_PATH)
         filas, _ = cargar_sheet(ws)
-        state["conteo_notas"] = _contar_estados_notas(filas)
+        state["notas_filas"] = filas
         return True
     except Exception as e:
         state["conteo_notas_error"] = str(e)
@@ -450,23 +453,6 @@ def render_script_tab(key, cfg):
     elif state.get("conteo_error"):
         st.error(f"No pude leer el Sheet: {state['conteo_error']}")
 
-    if cfg.get("sheet_resultados"):
-        if state.get("conteo_notas"):
-            conteo_notas = state["conteo_notas"]
-            st.caption("Notas exportadas (histórico acumulado en EXPORTAR_NOTAS_RESULTADOS):")
-            cols_notas = st.columns(3)
-            for col, (etiqueta, n) in zip(cols_notas, conteo_notas.items()):
-                col.metric(etiqueta, n)
-
-            total_notas = sum(conteo_notas.values())
-            if total_notas > 0:
-                st.progress(
-                    conteo_notas["OK"] / total_notas,
-                    text=f"{conteo_notas['OK']}/{total_notas} notas exportadas OK",
-                )
-        elif state.get("conteo_notas_error"):
-            st.error(f"No pude leer el histórico de notas: {state['conteo_notas_error']}")
-
     username, password = user_config.tp_credenciales_default()
     if not (username and password):
         st.warning(
@@ -557,6 +543,43 @@ def render_script_tab(key, cfg):
         codigos_nota_env = ",".join(codigos_a_exportar) if codigos_a_exportar else None
         if items_paso1 and not codigos_nota_env:
             st.caption("⚠️ No queda ningún idioma tildado — destildá menos o elegí otra nota.")
+
+        # Progreso de notas para la selección de arriba: cuántas de ESOS
+        # códigos ya están exportadas en EXPORTAR_NOTAS_RESULTADOS, sobre
+        # el total esperado (productos del Sheet × notas elegidas). Antes
+        # mostraba el histórico de TODA la hoja (cualquier nota, de
+        # cualquier corrida pasada) y no guardaba relación con el conteo
+        # de productos de arriba — confuso. Necesita conocer la selección
+        # vigente, por eso va acá y no en el bloque de conteo de arriba.
+        if cfg.get("sheet_resultados"):
+            notas_filas = state.get("notas_filas")
+            if notas_filas is not None and codigos_a_exportar:
+                codigos_set = set(codigos_a_exportar)
+                filas_sel = [
+                    f for f in notas_filas
+                    if (f.get("Codigo_Nota") or "").strip().upper() in codigos_set
+                ]
+                conteo_notas = _contar_estados_notas(filas_sel)
+                total_productos = sum(state["conteo"].values()) if state.get("conteo") else 0
+                esperado = total_productos * len(codigos_set)
+
+                st.caption(
+                    f"Notas exportadas para la selección de arriba — "
+                    f"{len(codigos_set)} nota(s) × {total_productos} producto(s) "
+                    f"= {esperado} esperadas:"
+                )
+                cols_notas = st.columns(3)
+                for col, (etiqueta, n) in zip(cols_notas, conteo_notas.items()):
+                    col.metric(etiqueta, n)
+                if esperado > 0:
+                    st.progress(
+                        min(conteo_notas["OK"] / esperado, 1.0),
+                        text=f"{conteo_notas['OK']}/{esperado} notas exportadas OK",
+                    )
+            elif notas_filas is not None:
+                st.caption("Elegí al menos una nota arriba para ver el progreso de notas.")
+            elif state.get("conteo_notas_error"):
+                st.error(f"No pude leer el histórico de notas: {state['conteo_notas_error']}")
 
     campos_completos = bool(sheet_url and username and password and base_url)
     if cfg.get("notas_a_exportar"):
