@@ -89,18 +89,18 @@ ELIMINAR_NO_SI = [
 # familias + código suelto (Paso 1) y, para las que tienen variante de
 # idioma, checkboxes de idioma (Paso 2) — ver render_script_tab().
 FAMILIAS_NOTA = {
-    "Nota SRV":    {"Alemán": "NAL", "Español": "NES", "Francés": "NFR", "Inglés": "NIN", "Italiano": "NIT"},
-    "Descriptivo": {"Alemán": "UAL", "Español": "UES", "Francés": "UFR", "Inglés": "UIN", "Italiano": "UIT"},
-    "Título":      {"Alemán": "TAL", "Español": "TES", "Francés": "TFR", "Inglés": "TIN", "Italiano": "TIT"},
-    "Luggage Waiver": {"Alemán": "LWG", "Español": "LWS", "Francés": "LWF", "Inglés": "LWE", "Italiano": "LWI"},
+    "Nota SRV":    {"Aleman": "NAL", "Espanol": "NES", "Frances": "NFR", "Ingles": "NIN", "Italiano": "NIT"},
+    "Descriptivo": {"Aleman": "UAL", "Espanol": "UES", "Frances": "UFR", "Ingles": "UIN", "Italiano": "UIT"},
+    "Titulo":      {"Aleman": "TAL", "Espanol": "TES", "Frances": "TFR", "Ingles": "TIN", "Italiano": "TIT"},
+    "Luggage Waiver": {"Aleman": "LWG", "Espanol": "LWS", "Frances": "LWF", "Ingles": "LWE", "Italiano": "LWI"},
 }
 
 CODIGOS_SUELTOS = {
-    "Dirección Rent a Car":               "DRT",
+    "Direccion Rent a Car":               "DRT",
     "Producto Coordinates":               "PCR",
-    "Remodelación Hotel":                 "REM",
+    "Remodelacion Hotel":                 "REM",
     "Nota Cliente Solo Voucher":          "REO",
-    "External Option - Mapeo Específico": "SC2",
+    "External Option - Mapeo Especifico": "SC2",
 }
 
 SCRIPTS = {
@@ -473,7 +473,7 @@ def render_script_tab(key, cfg):
             key=f"notas_familias_{key}",
             disabled=state["running"],
             help="Elegí una o varias. Para las que tienen variante de idioma "
-                 "(Nota SRV, Descriptivo, Título, Luggage Waiver), después "
+                 "(Nota SRV, Descriptivo, Titulo, Luggage Waiver), después "
                  "tildás abajo qué idiomas.",
         )
         codigos_a_exportar = []

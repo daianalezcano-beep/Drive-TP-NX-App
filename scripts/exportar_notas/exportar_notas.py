@@ -150,20 +150,20 @@ TOKEN_PATH       = os.environ.get("TOURPLAN_TOKEN_PATH", _TOKEN_PATH_DEFAULT)
 # propósito (no se usan a diario, decisión de la usuaria) — no hay un
 # listado completo de esos todavía.
 FAMILIAS_NOTA = {
-    "Nota SRV":    {"Alemán": "NAL", "Español": "NES", "Francés": "NFR", "Inglés": "NIN", "Italiano": "NIT"},
-    "Descriptivo": {"Alemán": "UAL", "Español": "UES", "Francés": "UFR", "Inglés": "UIN", "Italiano": "UIT"},
-    "Título":      {"Alemán": "TAL", "Español": "TES", "Francés": "TFR", "Inglés": "TIN", "Italiano": "TIT"},
+    "Nota SRV":    {"Aleman": "NAL", "Espanol": "NES", "Frances": "NFR", "Ingles": "NIN", "Italiano": "NIT"},
+    "Descriptivo": {"Aleman": "UAL", "Espanol": "UES", "Frances": "UFR", "Ingles": "UIN", "Italiano": "UIT"},
+    "Titulo":      {"Aleman": "TAL", "Espanol": "TES", "Frances": "TFR", "Ingles": "TIN", "Italiano": "TIT"},
     # Luggage Waiver usa sufijos en inglés (E/F/G/I/S), no AL/ES/FR/IN/IT
     # como las otras 3 familias — confirmado en el catálogo.
-    "Luggage Waiver": {"Alemán": "LWG", "Español": "LWS", "Francés": "LWF", "Inglés": "LWE", "Italiano": "LWI"},
+    "Luggage Waiver": {"Aleman": "LWG", "Espanol": "LWS", "Frances": "LWF", "Ingles": "LWE", "Italiano": "LWI"},
 }
 
 CODIGOS_SUELTOS = {
-    "Dirección Rent a Car":               "DRT",
+    "Direccion Rent a Car":               "DRT",
     "Producto Coordinates":               "PCR",
-    "Remodelación Hotel":                 "REM",
+    "Remodelacion Hotel":                 "REM",
     "Nota Cliente Solo Voucher":          "REO",
-    "External Option - Mapeo Específico": "SC2",
+    "External Option - Mapeo Especifico": "SC2",
 }
 
 # Códigos a exportar esta corrida — resueltos por la app a partir de las
