@@ -1272,6 +1272,11 @@ coinciden, se da la fila por OK sin error.
 reportado, falta confirmar con una corrida nueva que el período que antes
 daba error ahora queda OK.
 
+Mismo bloque de código (copiado en los 3 scripts) confirmado y corregido
+también en **Valorización desde Servicio Madre Numéricos**
+(`valorizacion_desde_madre_numericos.py`) y en el pkg v3
+(`tourplan_valorizacion_pkg_v3.py`).
+
 ## Seguridad — qué tener en cuenta
 
 - **La app solo escucha en la propia PC** (`--server.address=localhost` en
@@ -1358,6 +1363,11 @@ daba error ahora queda OK.
       (Valorización desde Servicio Madre, Fase 2 — ver sección de fixes
       arriba) — portado directo del caso reportado por la usuaria, sin
       correr todavía.
+- [x] Portar el mismo fix a Valorización desde Servicio Madre Numéricos
+      y al pkg v3 (mismo bloque de código copiado en los 3 scripts).
+- [ ] Validar contra Tourplan real el fix anterior en Valorización desde
+      Servicio Madre Numéricos y en el pkg v3 — portado por analogía,
+      sin correr todavía en ninguno de los dos.
 - [x] Validar contra Tourplan real la optimización de ordenar Used In por
       Date (paso 0 en `abrir_pcm()` y en `leer_pcm_list()`/
       `leer_pcm_list_package_header()`, ver sección "Optimización —
