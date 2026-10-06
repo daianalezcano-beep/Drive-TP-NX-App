@@ -1056,32 +1056,6 @@ def update_row(ws, row_idx, columnas, estado=None, detalle=None, texto_exportado
     actualizar_fila_sheet(ws, row_idx, columnas, valores)
 
 
-# ── Completar producto heredado de la fila anterior ──────────────
-def _resolver_fill_down(rows):
-    """Si una fila no especifica NINGUNO de Location/Supplier/Service_Type/
-    Code, hereda los 4 valores de la última fila (en orden del Sheet) que
-    sí los tenía completos — permite cargar varias notas del mismo
-    producto completando Location/Supplier/Service_Type/Code una sola vez
-    y repitiendo solo Codigo_Nota en las filas siguientes, sin tener que
-    volver a escribir el producto en cada una. Cada fila sigue
-    reportando su propio ESTADO y su propia celda Texto_Exportado — no
-    se combina nada.
-
-    Si solo ALGUNOS de los 4 vienen vacíos (carga parcial/inconsistente),
-    no se completa nada acá — la validación ya existente en
-    process_nota() reporta el error de campos faltantes como siempre."""
-    campos = ("Location", "Supplier", "Service_Type", "Code")
-    anterior = None
-    for row in rows:
-        valores = {c: str(row.get(c) or "").strip() for c in campos}
-        if anterior and all(not v for v in valores.values()):
-            for c in campos:
-                row[c] = anterior[c]
-        elif all(valores.values()):
-            anterior = {c: row.get(c) for c in campos}
-    return rows
-
-
 # ── Agrupar filas por producto (encadenamiento) ──────────────────
 def _agrupar_por_producto(filas):
     """
@@ -1202,7 +1176,6 @@ def main():
         raise ValueError("No se indicó la URL del Google Sheet (TOURPLAN_SHEET_URL).")
 
     ws, rows, columnas = load_sheet(HOJA)
-    rows = _resolver_fill_down(rows)
     pendientes = [r for r in rows
                   if str(r.get("ESTADO") or "").strip().upper() == "PENDIENTE"]
 

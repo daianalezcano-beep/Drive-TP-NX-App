@@ -247,19 +247,6 @@ que ya usan los scripts de Valorización. Si un grupo entero falla al
 buscar/abrir el producto, todas sus filas quedan en `ERROR` sin intentar
 nada más.
 
-**"Blanco = mismo producto de la fila de arriba" (solo Exportar Notas):**
-pedido de la usuaria (2026-10-06) para no tener que repetir
-Location/Supplier/Service_Type/Code en cada fila cuando necesita varias
-notas del mismo producto — antes había que repetir las 4 columnas en
-cada fila, variando solo `Codigo_Nota`. `_resolver_fill_down()` corre
-antes de agrupar: si una fila no trae NINGUNO de esos 4 campos, hereda
-los 4 de la última fila (en orden del Sheet) que sí los tenía completos.
-Si solo ALGUNOS vienen vacíos (carga parcial), no se completa nada — la
-validación existente de `process_nota()` reporta el error de campos
-faltantes como siempre, en vez de adivinar. Cada fila sigue teniendo su
-propio ESTADO y su propia celda `Texto_Exportado` — los resultados nunca
-se combinan en una sola celda.
-
 **Re-sincronización — distinta en cada script, porque el riesgo que
 mitiga es distinto:**
 - **Notas SRV:** un SAVE exitoso (INSERT o EDIT) cierra el editor solo,
@@ -1430,14 +1417,6 @@ también en **Valorización desde Servicio Madre Numéricos**
       Python de la lógica de control (7 escenarios). Probar con un Excel
       que tenga 2+ notas del mismo producto y confirmar en las capturas
       que cada nota se cierra antes de abrir la siguiente.
-- [ ] Validar contra Tourplan real "blanco = mismo producto de la fila de
-      arriba" en Exportar Notas (`_resolver_fill_down()` — ver sección
-      "Notas SRV / Exportar Notas" arriba) — sin correr todavía. Probar
-      con un Excel de 2+ notas del mismo producto dejando
-      Location/Supplier/Service_Type/Code en blanco salvo en la primera
-      fila, y por separado una fila con carga parcial (algunos de los 4
-      campos vacíos, no todos) para confirmar que reporta el error de
-      campos faltantes en vez de adivinar el producto.
 - [ ] Validar contra Tourplan real el fix del segundo click en "Date"
       (ver sección "Fix — el segundo click en 'Date' invertía el orden..."
       arriba) — en la corrida real que reveló esto, `abrir_pcm()` seguía
