@@ -13,12 +13,12 @@
 # ESTADO.md en el repo origen para el historial completo de bugs y fixes
 # ya resueltos antes de tocar esa parte.
 # ------------------------------------------------------------
-#   VERSION : 1.4
-#   FECHA   : 2026-09-01
+#   VERSION : 1.5
+#   FECHA   : 2026-10-06
 # ============================================================
 
-VERSION       = "1.4"
-VERSION_FECHA = "2026-09-01"
+VERSION       = "1.5"
+VERSION_FECHA = "2026-10-06"
 
 # ── CAMBIOS ──
 # v1.0: primera versión — basada en notas_srv.py v1.9 (bootstrap, login,
@@ -100,6 +100,26 @@ VERSION_FECHA = "2026-09-01"
 #       entre las filas sugeridas, la que tiene una celda con texto EXACTO
 #       (case-insensitive) igual al Location pedido; si ninguna coincide,
 #       no se clickea nada a ciegas.
+# v1.5: rediseño pedido por la usuaria — antes había que repetir
+#       Location/Supplier/Service_Type/Code en una fila por cada
+#       Codigo_Nota a exportar (ej. 5 notas de 728 códigos = 3640 filas
+#       a mano). Ahora:
+#       - El Sheet de entrada vuelve a ser una fila = un product code,
+#         sin columna Codigo_Nota.
+#       - Qué notas exportar se configura UNA vez por corrida desde la
+#         pestaña de la app (familias con variante de idioma —Nota SRV,
+#         Descriptivo, Título, Luggage Waiver— + 5 códigos sueltos sin
+#         idioma, ver FAMILIAS_NOTA/CODIGOS_SUELTOS), resuelto a
+#         TOURPLAN_CODIGOS_NOTA (lista de códigos separados por coma).
+#       - Los resultados van a una pestaña nueva (HOJA_RESULTADOS,
+#         default "EXPORTAR_NOTAS_RESULTADOS"): una fila por cada
+#         producto × nota exportada, agregada siempre al final (nunca
+#         se actualiza una fila existente).
+#       - El Sheet de entrada pasa a llevar un ESTADO agregado por
+#         producto: EXPORTADO (todas las notas configuradas salieron
+#         bien), PARCIAL (algunas sí, algunas no) o ERROR (ninguna).
+#       Reemplaza por completo el formato anterior de este script — no
+#       convive con él. No toca notas_srv.py (insertar/editar notas).
 
 # ── CONFIGURACIÓN — via variables de entorno (con default = valor original) ──
 import os
@@ -111,8 +131,47 @@ from common.user_config import (
 
 SHEET_URL        = os.environ.get("TOURPLAN_SHEET_URL", "")
 HOJA             = os.environ.get("TOURPLAN_HOJA", "EXPORTAR_NOTAS")
+# Hoja de salida — una fila por cada (producto × nota exportada). Nunca
+# se actualiza una fila existente, siempre se agrega una nueva (pedido
+# explícito de la usuaria, 2026-10-06) — tiene que existir de antemano
+# como pestaña vacía en el mismo Sheet (conectar_sheets no crea pestañas
+# solas); el script le agrega los encabezados solo si hacen falta.
+HOJA_RESULTADOS  = os.environ.get("TOURPLAN_HOJA_RESULTADOS", "EXPORTAR_NOTAS_RESULTADOS")
 CREDENTIALS_PATH = os.environ.get("TOURPLAN_CREDENTIALS_PATH", _CREDENTIALS_PATH_DEFAULT)
 TOKEN_PATH       = os.environ.get("TOURPLAN_TOKEN_PATH", _TOKEN_PATH_DEFAULT)
+
+# ── Catálogo de notas (para resolver TOURPLAN_CODIGOS_NOTA) ──────
+# Mismo catálogo confirmado en notas_srv.py (CODIGOS_NOTA_VALIDOS,
+# captura real del catálogo de Note Category de Tourplan, 2026-08-28),
+# reorganizado acá por familia con variante de idioma y códigos sueltos
+# sin idioma — la app arma la UI (familias + checkboxes de idioma) a
+# partir de esto. Los códigos HTML del mismo catálogo (OBS, NAP, SDV,
+# los HY* de hyperlinks, los TB* de Tax Brasil, etc.) quedan afuera a
+# propósito (no se usan a diario, decisión de la usuaria) — no hay un
+# listado completo de esos todavía.
+FAMILIAS_NOTA = {
+    "Nota SRV":    {"Alemán": "NAL", "Español": "NES", "Francés": "NFR", "Inglés": "NIN", "Italiano": "NIT"},
+    "Descriptivo": {"Alemán": "UAL", "Español": "UES", "Francés": "UFR", "Inglés": "UIN", "Italiano": "UIT"},
+    "Título":      {"Alemán": "TAL", "Español": "TES", "Francés": "TFR", "Inglés": "TIN", "Italiano": "TIT"},
+    # Luggage Waiver usa sufijos en inglés (E/F/G/I/S), no AL/ES/FR/IN/IT
+    # como las otras 3 familias — confirmado en el catálogo.
+    "Luggage Waiver": {"Alemán": "LWG", "Español": "LWS", "Francés": "LWF", "Inglés": "LWE", "Italiano": "LWI"},
+}
+
+CODIGOS_SUELTOS = {
+    "Dirección Rent a Car":               "DRT",
+    "Producto Coordinates":               "PCR",
+    "Remodelación Hotel":                 "REM",
+    "Nota Cliente Solo Voucher":          "REO",
+    "External Option - Mapeo Específico": "SC2",
+}
+
+# Códigos a exportar esta corrida — resueltos por la app a partir de las
+# familias/idiomas y códigos sueltos tildados en la pestaña de Exportar
+# Notas (no vienen más de una columna del Sheet). Formato: códigos
+# separados por coma, ej. "NAL,NES,TIT,DRT".
+CODIGOS_NOTA = [c.strip().upper() for c in
+                os.environ.get("TOURPLAN_CODIGOS_NOTA", "").split(",") if c.strip()]
 
 USERNAME   = os.environ.get("TOURPLAN_USERNAME", "poner minusculas")
 PASSWORD   = os.environ.get("TOURPLAN_PASSWORD", "password")
@@ -164,7 +223,10 @@ from common.chrome_bootstrap import find_or_prepare_chrome
 # Botón Abortar de la app (ver common/abort.py)
 from common.abort import chequear_abort, AbortadoPorUsuario, ABORT_EXIT_CODE
 # Google Sheets como cola de trabajo (ver common/sheets_client.py)
-from common.sheets_client import conectar_sheets, cargar_sheet, actualizar_fila_sheet
+from common.sheets_client import (
+    conectar_sheets, cargar_sheet, actualizar_fila_sheet,
+    agregar_fila_sheet, asegurar_columnas,
+)
 
 CHROMIUM_BIN, ver_chrome = find_or_prepare_chrome()
 
@@ -1044,76 +1106,84 @@ def load_sheet(hoja):
     return ws, rows, columnas
 
 
-def update_row(ws, row_idx, columnas, estado=None, detalle=None, texto_exportado=None):
-    """Escribe INMEDIATAMENTE tras cada fila — no acumular para el final."""
+def update_row(ws, row_idx, columnas, estado=None, detalle=None):
+    """Escribe INMEDIATAMENTE tras cada fila — no acumular para el final.
+    Acá solo se escribe el ESTADO agregado del PRODUCTO (EXPORTADO/
+    PARCIAL/ERROR, ver _resumir_estado) — el texto de cada nota va a la
+    hoja de resultados (agregar_resultado()), nunca acá."""
     valores = {}
     if estado is not None:
         valores["ESTADO"] = estado
     if detalle is not None and "DETALLE_PROCESO" in columnas:
         valores["DETALLE_PROCESO"] = detalle
-    if texto_exportado is not None and "Texto_Exportado" in columnas:
-        valores["Texto_Exportado"] = texto_exportado
     actualizar_fila_sheet(ws, row_idx, columnas, valores)
 
 
-# ── Agrupar filas por producto (encadenamiento) ──────────────────
-def _agrupar_por_producto(filas):
-    """
-    Agrupa filas PENDIENTE por producto (Location+Supplier+Code+
-    Service_Type), preservando el orden de primera aparición. Filas del
-    mismo producto pero distinto Codigo_Nota quedan juntas para reutilizar
-    la búsqueda del producto y la apertura de Product Notes — no hace
-    falta repetirlas por cada nota del mismo producto. Mismo patrón que
-    notas_srv.py (que a su vez sigue el de los scripts de Valorización).
-    """
-    grupos, orden = {}, []
-    for f in filas:
-        key = (
-            str(f.get("Location")     or "").strip().upper(),
-            str(f.get("Supplier")     or "").strip().upper(),
-            str(f.get("Code")         or "").strip().upper(),
-            str(f.get("Service_Type") or "").strip().upper(),
-        )
-        if key not in grupos:
-            grupos[key] = []
-            orden.append(key)
-        grupos[key].append(f)
-    return [grupos[k] for k in orden]
+def agregar_resultado(ws_res, columnas_res, location, supplier, service_type, code,
+                       codigo_nota, estado, detalle, texto_exportado):
+    """Agrega UNA fila a la hoja de resultados — una por cada (producto ×
+    nota exportada). Nunca actualiza una fila existente, siempre suma una
+    nueva, aunque el producto se repita en corridas futuras (pedido
+    explícito de la usuaria, 2026-10-06)."""
+    valores = {
+        "Location":     location,
+        "Supplier":     supplier,
+        "Service_Type": service_type,
+        "Code":         code,
+        "Codigo_Nota":  codigo_nota,
+        "ESTADO":       estado,
+    }
+    if detalle is not None:
+        valores["DETALLE_PROCESO"] = detalle
+    if texto_exportado is not None:
+        valores["Texto_Exportado"] = texto_exportado
+    agregar_fila_sheet(ws_res, columnas_res, valores)
+
+
+def _resumir_estado(codigos, resultados):
+    """Resume los resultados por-nota de un producto (uno por código en
+    CODIGOS_NOTA, mismo orden) en el ESTADO agregado que va a la fila del
+    input: EXPORTADO (todas se exportaron), ERROR (ninguna), PARCIAL
+    (algunas sí, algunas no) — pedido explícito de la usuaria para poder
+    identificar fácil los productos a medio exportar."""
+    ok = sum(1 for e in resultados if e == "EXPORTADA")
+    total = len(codigos)
+    fallidas = [f"{c}: {e}" for c, e in zip(codigos, resultados) if e != "EXPORTADA"]
+    detalle = f"{ok}/{total} notas exportadas"
+    if fallidas:
+        detalle += f" — fallidas: {'; '.join(fallidas[:3])}"
+    if ok == total:
+        return "EXPORTADO", detalle
+    if ok == 0:
+        return "ERROR", detalle
+    return "PARCIAL", detalle
 
 
 def _buscar_y_abrir_producto(driver, location, supplier, code, service_type):
     """
-    Busca el producto y abre Product Notes UNA VEZ por grupo. El caller
-    (MAIN) reutiliza esta apertura para todas las filas del Excel que
-    compartan el mismo producto, sin repetir buscar_producto() por cada
-    Codigo_Nota — sí se vuelve a llamar abrir_product_notes() (sola, sin
-    buscar_producto()) entre notas del mismo grupo, ver "Re-sincronización"
-    en process_nota()/MAIN más abajo.
+    Busca el producto y abre Product Notes UNA VEZ por producto. El
+    caller (MAIN) reutiliza esta apertura para todas las notas
+    configuradas (CODIGOS_NOTA) de ese producto, sin repetir
+    buscar_producto() por cada una — sí se vuelve a llamar
+    abrir_product_notes() (sola, sin buscar_producto()) entre notas del
+    mismo producto, ver "Re-sincronización" en MAIN más abajo.
     """
     buscar_producto(driver, location, supplier, code, service_type=service_type)
     abrir_product_notes(driver)
 
 
 # ── Procesamiento de una nota, sobre un producto ya abierto ──────
-def process_nota(driver, row):
-    """Procesa UN Codigo_Nota sobre un producto YA ABIERTO en Product
-    Notes (ver _buscar_y_abrir_producto(), llamada por el caller una sola
-    vez por grupo de filas del mismo producto — no repite la búsqueda del
+def process_nota_item(driver, row_idx, codigo_nota):
+    """Procesa UN código de nota (de CODIGOS_NOTA, configurado en la
+    corrida — no viene de una columna del Sheet) sobre un producto YA
+    ABIERTO en Product Notes (ver _buscar_y_abrir_producto(), llamada
+    por el caller una sola vez por producto — no repite la búsqueda del
     producto ni la apertura de Product Notes).
 
     Devuelve (estado, detalle, texto_exportado).
     estado: "EXPORTADA" | "NO EXISTE" | "ERROR: <detalle>"
     """
-    location     = str(row.get("Location") or "").strip()
-    supplier     = str(row.get("Supplier") or "").strip()
-    service_type = str(row.get("Service_Type") or "").strip()
-    code         = str(row.get("Code") or "").strip()
-    codigo_nota  = str(row.get("Codigo_Nota") or "").strip().upper()
-    row_idx      = row["__row_idx__"]
-
-    if not (location and supplier and service_type and code and codigo_nota):
-        return ("ERROR: faltan campos obligatorios "
-                "(Location/Supplier/Service_Type/Code/Codigo_Nota)", None, None)
+    codigo_nota = codigo_nota.strip().upper()
 
     try:
         tabla = encontrar_tabla_notas(driver)
@@ -1175,6 +1245,14 @@ def main():
     if not SHEET_URL:
         raise ValueError("No se indicó la URL del Google Sheet (TOURPLAN_SHEET_URL).")
 
+    if not CODIGOS_NOTA:
+        raise ValueError(
+            "No se configuró ninguna nota para exportar (TOURPLAN_CODIGOS_NOTA vacío). "
+            "Elegí al menos una familia/idioma o código suelto en la pestaña de "
+            "Exportar Notas antes de correr."
+        )
+    print(f"Notas a exportar por producto ({len(CODIGOS_NOTA)}): {', '.join(CODIGOS_NOTA)}")
+
     ws, rows, columnas = load_sheet(HOJA)
     pendientes = [r for r in rows
                   if str(r.get("ESTADO") or "").strip().upper() == "PENDIENTE"]
@@ -1184,80 +1262,86 @@ def main():
         print("\n⛔ Sin filas PENDIENTE. Verificá que la columna ESTADO tenga 'PENDIENTE'.")
         return
 
+    # Hoja de resultados — tiene que existir de antemano como pestaña
+    # vacía en el mismo Sheet (ver HOJA_RESULTADOS más arriba); se le
+    # agregan los encabezados solos si todavía no los tiene.
+    ws_res = conectar_sheets(SHEET_URL, HOJA_RESULTADOS, CREDENTIALS_PATH, TOKEN_PATH)
+    asegurar_columnas(ws_res, ["Location", "Supplier", "Service_Type", "Code",
+                               "Codigo_Nota", "ESTADO", "DETALLE_PROCESO", "Texto_Exportado"])
+    columnas_res = ws_res.row_values(1)
+
     driver = crear_driver()
     _abortado = False
     try:
         login(driver)
 
-        grupos = _agrupar_por_producto(pendientes)
-        print(f"Productos a procesar: {len(grupos)} (de {len(pendientes)} fila(s) PENDIENTE)")
+        print(f"Productos a procesar: {len(pendientes)}")
 
-        for grupo in grupos:
+        for row in pendientes:
             chequear_abort()
-            ref          = grupo[0]
-            location     = str(ref.get("Location")     or "").strip()
-            supplier     = str(ref.get("Supplier")     or "").strip()
-            service_type = str(ref.get("Service_Type") or "").strip()
-            code         = str(ref.get("Code")         or "").strip()
+            row_idx      = row["__row_idx__"]
+            location     = str(row.get("Location")     or "").strip()
+            supplier     = str(row.get("Supplier")     or "").strip()
+            service_type = str(row.get("Service_Type") or "").strip()
+            code         = str(row.get("Code")         or "").strip()
 
             print(f"\n{'=' * 60}")
-            print(f"Producto: {location}/{supplier}/{code} [{service_type}]"
-                  + (f"  ({len(grupo)} nota(s))" if len(grupo) > 1 else ""))
+            print(f"Producto: {location}/{supplier}/{code} [{service_type}]  "
+                  f"({len(CODIGOS_NOTA)} nota(s) a exportar)")
             print(f"{'=' * 60}")
+
+            if not (location and supplier and service_type and code):
+                estado = "ERROR: faltan campos obligatorios (Location/Supplier/Service_Type/Code)"
+                print(f"  Estado: {estado}")
+                update_row(ws, row_idx, columnas, estado=estado, detalle=None)
+                continue
 
             try:
                 _buscar_y_abrir_producto(driver, location, supplier, code, service_type)
             except ProductoNoEncontrado as e:
                 estado = f"ERROR: producto no encontrado — {e}"
-                for row in grupo:
-                    print(f"  Estado: {estado}")
-                    update_row(ws, row["__row_idx__"], columnas,
-                               estado=estado, detalle=None)
+                print(f"  Estado: {estado}")
+                update_row(ws, row_idx, columnas, estado=estado, detalle=None)
                 continue
             except Exception as e:
-                ss(driver, f"buscar_error_grupo_{code[:12]}")
+                ss(driver, f"buscar_error_{code[:12]}")
                 estado = f"ERROR: falla buscando/abriendo producto — {e}"
-                for row in grupo:
-                    print(f"  Estado: {estado}")
-                    update_row(ws, row["__row_idx__"], columnas,
-                               estado=estado, detalle=None)
+                print(f"  Estado: {estado}")
+                update_row(ws, row_idx, columnas, estado=estado, detalle=None)
                 continue
 
-            if len(grupo) > 1:
-                print(f"  ℹ️  {len(grupo)} nota(s) para el mismo producto — "
-                      f"reutilizando búsqueda y apertura de Product Notes")
-
-            for i, row in enumerate(grupo):
+            resultados = []
+            for i, codigo_nota in enumerate(CODIGOS_NOTA):
                 chequear_abort()
-                row_idx = row["__row_idx__"]
                 print(f"\n{'─' * 60}")
-                print(f"Fila {row_idx}: Codigo_Nota={row.get('Codigo_Nota')}")
+                print(f"Fila {row_idx}: Codigo_Nota={codigo_nota}")
 
-                estado, detalle, texto_exportado = "ERROR", "Error desconocido", None
+                estado_n, detalle_n, texto_n = "ERROR", "Error desconocido", None
                 try:
-                    estado, detalle, texto_exportado = process_nota(driver, row)
+                    estado_n, detalle_n, texto_n = process_nota_item(driver, row_idx, codigo_nota)
                 except Exception:
-                    estado = "ERROR"
-                    detalle = traceback.format_exc(limit=3)
+                    estado_n = "ERROR"
+                    detalle_n = traceback.format_exc(limit=3)
 
-                print(f"  Estado: {estado}" + (f" — {detalle}" if detalle else ""))
-                update_row(ws, row_idx, columnas,
-                           estado=estado, detalle=detalle, texto_exportado=texto_exportado)
+                print(f"  Estado: {estado_n}" + (f" — {detalle_n}" if detalle_n else ""))
+                agregar_resultado(ws_res, columnas_res, location, supplier, service_type,
+                                   code, codigo_nota, estado_n, detalle_n, texto_n)
+                resultados.append(estado_n)
 
-                # Re-sincronización: process_nota() ya se encarga de cerrar
-                # la nota (botón "Exit") apenas termina de leerla — ver
-                # cerrar_nota(), llamada ahí mismo — así que el caso normal
-                # ya vuelve limpio a la tabla de Product Notes sin hacer
-                # nada más acá. Igual que en Notas SRV, el riesgo real es
-                # que una nota termine en `ERROR`: puede ser justamente
-                # porque el cierre con Exit falló (cerrar_nota() devolvió
-                # False) y algo quedó abierto. Si quedan más notas del mismo
-                # producto, se re-sincroniza: primero liviano (reabrir
-                # Product Notes, sin repetir la búsqueda del producto) y, si
-                # eso también falla, una re-sincronización completa
+                # Re-sincronización: process_nota_item() ya se encarga de
+                # cerrar la nota (botón "Exit") apenas termina de leerla —
+                # ver cerrar_nota(), llamada ahí mismo — así que el caso
+                # normal ya vuelve limpio a la tabla de Product Notes sin
+                # hacer nada más acá. Igual que en Notas SRV, el riesgo
+                # real es que una nota termine en `ERROR`: puede ser
+                # justamente porque el cierre con Exit falló (cerrar_nota()
+                # devolvió False) y algo quedó abierto. Si quedan más notas
+                # configuradas, se re-sincroniza: primero liviano (reabrir
+                # Product Notes, sin repetir la búsqueda del producto) y,
+                # si eso también falla, una re-sincronización completa
                 # (`_buscar_y_abrir_producto()`, con nueva búsqueda).
-                hay_mas_notas = i < len(grupo) - 1
-                if estado.startswith("ERROR") and hay_mas_notas:
+                hay_mas_notas = i < len(CODIGOS_NOTA) - 1
+                if estado_n.startswith("ERROR") and hay_mas_notas:
                     print("  ↩ Nota en ERROR — re-sincronizando Product Notes "
                           "antes de la próxima nota del mismo producto")
                     try:
@@ -1269,14 +1353,20 @@ def main():
                         try:
                             _buscar_y_abrir_producto(driver, location, supplier, code, service_type)
                         except Exception as e2:
-                            ss(driver, f"resync_error_grupo_{code[:12]}")
+                            ss(driver, f"resync_error_{code[:12]}")
                             estado_resync = (f"ERROR: no se pudo re-sincronizar Product "
                                              f"Notes tras la nota anterior — {e2}")
-                            for row_restante in grupo[i + 1:]:
-                                print(f"  Estado: {estado_resync}")
-                                update_row(ws, row_restante["__row_idx__"], columnas,
-                                           estado=estado_resync, detalle=None)
+                            for codigo_restante in CODIGOS_NOTA[i + 1:]:
+                                print(f"  Codigo_Nota={codigo_restante}: {estado_resync}")
+                                agregar_resultado(ws_res, columnas_res, location, supplier,
+                                                   service_type, code, codigo_restante,
+                                                   estado_resync, None, None)
+                                resultados.append(estado_resync)
                             break
+
+            estado_producto, detalle_producto = _resumir_estado(CODIGOS_NOTA, resultados)
+            print(f"\n  Estado producto: {estado_producto} — {detalle_producto}")
+            update_row(ws, row_idx, columnas, estado=estado_producto, detalle=detalle_producto)
 
     except AbortadoPorUsuario:
         _abortado = True

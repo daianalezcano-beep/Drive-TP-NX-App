@@ -228,24 +228,31 @@ principio, sino tablas hermanas dentro de un contenedor común):
   `COMO_COMPLETAR_EL_EXCEL.md` del repo origen para el detalle y ejemplos
   (ese archivo, en el repo origen, todavía lista solo los 5 códigos "Nota
   SRV" — desactualizado respecto de `CODIGOS_NOTA_VALIDOS`).
-- **Exportar Notas** lee el contenido de una nota que ya existe y lo
-  vuelca a la columna `Texto_Exportado` del Excel — es de **solo lectura**,
-  nunca inserta, edita ni guarda nada en Tourplan, así que no tiene modo
-  lectura/aplicar (siempre "ejecuta", que acá solo significa "exportar").
-  A diferencia de Notas SRV, el código de nota a buscar no está limitado a
-  una lista fija — exporta lo que venga en la columna `Codigo_Nota` de
-  cada fila.
+- **Exportar Notas** lee el contenido de notas que ya existen — es de
+  **solo lectura**, nunca inserta, edita ni guarda nada en Tourplan, así
+  que no tiene modo lectura/aplicar (siempre "ejecuta", que acá solo
+  significa "exportar"). **Rediseñado en v1.5** (ver sección "Exportar
+  Notas — rediseño v1.5" más abajo): el Excel de entrada ya no tiene una
+  fila por nota — qué notas exportar se elige una vez por corrida desde
+  la pestaña de la app, y los resultados se vuelcan a una hoja de salida
+  nueva.
 
-**Encadenamiento por producto (ambos scripts):** si un mismo producto
-necesita varias notas (varias filas con el mismo Location+Supplier+Code+
-Service_Type pero distinto `Codigo_Nota`), tanto Notas SRV como Exportar
-Notas agrupan esas filas (`_agrupar_por_producto()`) y buscan el producto
-+ abren Product Notes **una sola vez por grupo** (`_buscar_y_abrir_
-producto()`); cada `Codigo_Nota` del grupo se procesa después sobre esa
-misma apertura (`process_nota()`), sin repetir la búsqueda. Mismo patrón
-que ya usan los scripts de Valorización. Si un grupo entero falla al
-buscar/abrir el producto, todas sus filas quedan en `ERROR` sin intentar
-nada más.
+**Encadenamiento por producto:**
+- **Notas SRV:** si un mismo producto necesita varias notas (varias filas
+  con el mismo Location+Supplier+Code+Service_Type pero distinto
+  `Codigo_Nota`), agrupa esas filas (`_agrupar_por_producto()`) y busca el
+  producto + abre Product Notes **una sola vez por grupo**
+  (`_buscar_y_abrir_producto()`); cada `Codigo_Nota` del grupo se procesa
+  después sobre esa misma apertura (`process_nota()`), sin repetir la
+  búsqueda. Mismo patrón que ya usan los scripts de Valorización. Si un
+  grupo entero falla al buscar/abrir el producto, todas sus filas quedan
+  en `ERROR` sin intentar nada más.
+- **Exportar Notas (desde v1.5):** ya no agrupa filas del Excel — el
+  Excel es una fila por producto. El encadenamiento ahora es entre las
+  notas CONFIGURADAS (`CODIGOS_NOTA`, ver sección de rediseño más abajo):
+  busca el producto + abre Product Notes una sola vez por fila, y cada
+  código configurado se procesa sobre esa misma apertura
+  (`process_nota_item()`), sin repetir la búsqueda.
 
 **Re-sincronización — distinta en cada script, porque el riesgo que
 mitiga es distinto:**
@@ -263,9 +270,11 @@ mitiga es distinto:**
   (`cerrar_nota()`, click en `button.tpcancel` dentro de
   `#noteeditorview`, con fallback por texto "EXIT" — mismo botón/criterio
   que `_cerrar_ultimo_tp_dialog()` en Valorización desde Servicio Madre).
-  `process_nota()` la cierra sola, en un `finally`, apenas termina de leer
-  (haya salido bien o no) — así que en el caso normal no hace falta nada
-  más entre notas del mismo grupo. **Bug real encontrado por la usuaria en
+  `process_nota_item()` (antes `process_nota()`, renombrada en v1.5 — ver
+  sección de rediseño) la cierra sola, en un `finally`, apenas termina de
+  leer (haya salido bien o no) — así que en el caso normal no hace falta
+  nada más entre notas configuradas del mismo producto. **Bug real
+  encontrado por la usuaria en
   la primera corrida (2026-08-29):** sin este click, la nota quedaba
   abierta y la del producto siguiente se abría encima, sin cerrar la
   anterior — "se abren varias notas juntas". El riesgo residual (si
@@ -304,6 +313,72 @@ ambos y el resto del grupo queda en `ERROR` cortando el grupo; falla la
 búsqueda del producto y todo el grupo queda en `ERROR`; la última nota
 del grupo falla sin disparar resync de más) — **sin correr todavía contra
 Tourplan real con el fix del botón "Exit"**.
+
+## Exportar Notas — rediseño v1.5 (2026-10-06)
+
+Pedido de la usuaria: el flujo de entrada (fila = producto + código de
+nota) la obligaba a armar el Excel a mano repitiendo Location/Supplier/
+Service_Type/Code una vez por cada nota a exportar — para 5 notas de 728
+product codes, 3640 filas a preparar arrastrando columnas. Rediseño
+completo del script (no convive con el formato anterior):
+
+- **Excel de entrada simplificado** — vuelve a ser una fila = un product
+  code (`Location`/`Supplier`/`Service_Type`/`Code` + `ESTADO`/
+  `DETALLE_PROCESO`). Sin columna `Codigo_Nota`.
+- **Qué notas exportar se elige en la app, no en el Excel** — pestaña
+  "Exportar", en dos pasos:
+  1. Buscador/multiselect (`st.multiselect`) con 9 ítems al mismo nivel:
+     las 4 familias con variante de idioma (Nota SRV, Descriptivo,
+     Título, Luggage Waiver) y los 5 códigos sueltos sin idioma
+     (Dirección Rent a Car, Producto Coordinates, Remodelación Hotel,
+     Nota Cliente Solo Voucher, External Option - Mapeo Específico).
+  2. Para cada familia con idioma que se eligió en el paso 1, aparecen
+     sus propios checkboxes (Alemán/Español/Francés/Inglés/Italiano, por
+     default todos tildados) — nunca mezclados entre familias, porque
+     **Luggage Waiver usa sufijos de código distintos** a las otras 3
+     (inglés: E/F/G/I/S en vez de AL/ES/FR/IN/IT) — la UI resuelve esa
+     diferencia sola, mostrando siempre el nombre del idioma, nunca el
+     código.
+  Catálogo compartido en `FAMILIAS_NOTA`/`CODIGOS_SUELTOS`, duplicado
+  (sin import cruzado, cada script es un subproceso independiente) en
+  `app.py` y en `exportar_notas.py`. Se resuelve a
+  `TOURPLAN_CODIGOS_NOTA` (códigos separados por coma) para toda la
+  corrida — no es un valor por fila. Los códigos HTML del catálogo (ver
+  sección de arriba) quedan afuera a propósito, decisión de la usuaria.
+- **Hoja de salida nueva — `EXPORTAR_NOTAS_RESULTADOS`** (tiene que
+  existir de antemano como pestaña del mismo Sheet — `conectar_sheets()`
+  no crea pestañas solas, así que si no está, el script corta con un
+  error claro listando las pestañas disponibles). Formato **largo**: una
+  fila por cada producto × nota exportada (`Location`, `Supplier`,
+  `Service_Type`, `Code`, `Codigo_Nota`, `ESTADO`, `DETALLE_PROCESO`,
+  `Texto_Exportado`), agregada siempre al final — **nunca se actualiza
+  una fila existente**, ni siquiera si el mismo producto se vuelve a
+  correr en otra corrida (pedido explícito: "ir sumando las nuevas notas
+  en filas nuevas"). Usa `agregar_fila_sheet()` + el fix que agranda la
+  hoja sola si se pasa de 1000 filas (ver sección de fix más abajo) — con
+  728 códigos × 5 idiomas esto importa de entrada, no es un caso límite.
+- **ESTADO agregado por producto** (en el Excel de entrada, calculado por
+  `_resumir_estado()` a partir de los resultados de cada nota
+  configurada): `EXPORTADO` (todas salieron bien), `PARCIAL` (algunas sí,
+  algunas no — estado pedido explícitamente por la usuaria para poder
+  identificar fácil los productos a medio exportar), `ERROR` (ninguna,
+  incluye no encontrar/abrir el producto). El detalle de CADA nota
+  puntual (`EXPORTADA` / `NO EXISTE` / `ERROR: ...`) vive en la hoja de
+  resultados, no en el Excel de entrada.
+- `process_nota()` se renombra a `process_nota_item(driver, row_idx,
+  codigo_nota)` — recibe el código como parámetro en vez de leerlo de una
+  columna del Excel; el resto de la lógica (buscar la nota, leer el
+  iframe, cerrarla con "Exit") no cambia. `_agrupar_por_producto()` se
+  elimina — ya no hace falta, el Excel de entrada es 1 fila = 1 producto.
+
+**Sin correr todavía contra Tourplan real** — rediseño recién
+implementado. Antes de la primera corrida real hace falta: (1) agregar la
+pestaña `EXPORTAR_NOTAS_RESULTADOS` al Sheet existente (la plantilla
+nueva en `plantillas_excel/31_exportar_notas.xlsx` ya la trae, con sus
+encabezados), y (2) elegir al menos una nota en la pestaña de la app
+antes de ejecutar (si no, el script corta con un error claro). Probar
+primero con 2-3 product codes y una sola familia (ej. Nota SRV con los 5
+idiomas) antes de un lote grande.
 
 ## Vigencias — categoría "Relevamiento"
 
@@ -1388,6 +1463,19 @@ también en **Valorización desde Servicio Madre Numéricos**
       — vendorizado en `scripts/exportar_notas/`; la lectura de notas
       existentes se reescribió recién (v1.3) tras un diagnóstico por dump
       real de DOM y todavía no se re-probó contra Tourplan.
+- [ ] Validar contra Tourplan real el rediseño v1.5 de Exportar Notas
+      (Excel de entrada simplificado, selección de notas en dos pasos
+      desde la app, hoja `EXPORTAR_NOTAS_RESULTADOS` nueva, ESTADO
+      `EXPORTADO`/`PARCIAL`/`ERROR` por producto — ver sección "Exportar
+      Notas — rediseño v1.5" arriba). Recién implementado, sin correr
+      todavía. Antes de la primera corrida: agregar la pestaña
+      `EXPORTAR_NOTAS_RESULTADOS` al Sheet existente si no la tiene (la
+      plantilla nueva ya la trae). Probar primero con 2-3 product codes y
+      una sola familia (ej. Nota SRV, los 5 idiomas) antes de un lote
+      grande — en particular confirmar que Luggage Waiver resuelve bien
+      sus códigos (sufijos distintos a las otras 3 familias) y que el
+      ESTADO `PARCIAL` aparece cuando corresponde (alguna nota no existe
+      para un producto que sí tiene las demás).
 - [ ] Validar contra Tourplan real los 15 códigos Plain Text sumados a
       `CODIGOS_NOTA_VALIDOS` en esta sesión (`DRT`, `LWE`/`LWF`/`LWG`/`LWI`/
       `LWS`, `PCR`, `REM`, `REO`, `SC2`, `TAL`/`TES`/`TFR`/`TIN`/`TIT`) —
@@ -1407,16 +1495,16 @@ también en **Valorización desde Servicio Madre Numéricos**
       `ERROR` dentro de un grupo encadenado de **Notas SRV** (ver
       "Re-sincronización..." en la sección "Notas SRV / Exportar Notas"
       arriba) — confirmado funcionando por la usuaria.
-- [ ] Validar contra Tourplan real el encadenamiento por producto de
-      **Exportar Notas** con el fix del botón "Exit" (`cerrar_nota()` — ver
-      sección "Notas SRV / Exportar Notas" arriba). La primera corrida
-      real (2026-08-29) mostró el bug que el fix corrige: sin cerrar la
-      nota, se abrían varias notas juntas al pasar a la siguiente del
-      mismo producto. El fix en sí (click en "Exit" tras cada lectura)
-      todavía no se re-probó — verificado solo con una simulación en
-      Python de la lógica de control (7 escenarios). Probar con un Excel
-      que tenga 2+ notas del mismo producto y confirmar en las capturas
-      que cada nota se cierra antes de abrir la siguiente.
+- [ ] Validar contra Tourplan real el fix del botón "Exit"
+      (`cerrar_nota()` — ver sección "Notas SRV / Exportar Notas" arriba)
+      en **Exportar Notas**. La primera corrida real (2026-08-29) mostró
+      el bug que el fix corrige: sin cerrar la nota, se abrían varias
+      notas juntas al pasar a la siguiente. El fix en sí (click en "Exit"
+      tras cada lectura) todavía no se re-probó — verificado solo con una
+      simulación en Python de la lógica de control (7 escenarios, sobre el
+      diseño anterior a v1.5). Queda cubierto por la validación del
+      rediseño v1.5 de arriba (2+ notas configuradas sobre el mismo
+      producto ejercitan el mismo camino).
 - [ ] Validar contra Tourplan real el fix del segundo click en "Date"
       (ver sección "Fix — el segundo click en 'Date' invertía el orden..."
       arriba) — en la corrida real que reveló esto, `abrir_pcm()` seguía

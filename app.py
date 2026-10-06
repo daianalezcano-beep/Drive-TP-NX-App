@@ -81,6 +81,28 @@ ELIMINAR_NO_SI = [
     ("Delete (si falla, flag as deleted)", "SI"),
 ]
 
+# Catálogo de notas para Exportar Notas (TOURPLAN_CODIGOS_NOTA) — mismo
+# catálogo que FAMILIAS_NOTA/CODIGOS_SUELTOS en exportar_notas.py (no hay
+# import cruzado entre la app y los scripts, cada uno corre como
+# subproceso propio — ver duplicado ahí con el mismo detalle de por qué
+# Luggage Waiver usa sufijos en inglés). La UI arma un desplegable de
+# familias + código suelto (Paso 1) y, para las que tienen variante de
+# idioma, checkboxes de idioma (Paso 2) — ver render_script_tab().
+FAMILIAS_NOTA = {
+    "Nota SRV":    {"Alemán": "NAL", "Español": "NES", "Francés": "NFR", "Inglés": "NIN", "Italiano": "NIT"},
+    "Descriptivo": {"Alemán": "UAL", "Español": "UES", "Francés": "UFR", "Inglés": "UIN", "Italiano": "UIT"},
+    "Título":      {"Alemán": "TAL", "Español": "TES", "Francés": "TFR", "Inglés": "TIN", "Italiano": "TIT"},
+    "Luggage Waiver": {"Alemán": "LWG", "Español": "LWS", "Francés": "LWF", "Inglés": "LWE", "Italiano": "LWI"},
+}
+
+CODIGOS_SUELTOS = {
+    "Dirección Rent a Car":               "DRT",
+    "Producto Coordinates":               "PCR",
+    "Remodelación Hotel":                 "REM",
+    "Nota Cliente Solo Voucher":          "REO",
+    "External Option - Mapeo Específico": "SC2",
+}
+
 SCRIPTS = {
     "copy_products": {
         "label": "Copy Products (01)",
@@ -183,11 +205,12 @@ SCRIPTS = {
         "label": "Exportar (31)",
         "category": "Notas",
         # Fuente: https://github.com/daianalezcano-beep/copy-products/tree/notas-SRV
-        "help": "Exporta a una columna del Excel el contenido de una nota (Product Notes) ya existente en un producto. El código de nota no está limitado a una lista fija.",
+        "help": "Exporta notas (Product Notes) de una lista de product codes. Elegí abajo qué notas exportar — los resultados se agregan a la pestaña EXPORTAR_NOTAS_RESULTADOS del mismo Sheet, una fila por producto × nota.",
         "script_path": REPO_ROOT / "scripts" / "exportar_notas" / "exportar_notas.py",
         "base_url": PRODUCCION_URL,
         "sheet": "EXPORTAR_NOTAS",
-        "no_modo_info": "ℹ️ Este script es de solo lectura: exporta el contenido de la nota indicada a la columna Texto_Exportado del Excel, sin insertar, editar ni guardar nada en Tourplan.",
+        "no_modo_info": "ℹ️ Este script es de solo lectura: nunca inserta, edita ni guarda nada en Tourplan.",
+        "notas_a_exportar": True,
     },
     "extraccion_vigencias": {
         "label": "Vigencias (40)",
@@ -438,7 +461,44 @@ def render_script_tab(key, cfg):
     else:
         eliminar_env = None
 
+    codigos_nota_env = None
+    if cfg.get("notas_a_exportar"):
+        # Paso 1 — buscador: familias (con variante de idioma) + códigos
+        # sueltos (sin idioma), todos al mismo nivel. Paso 2 — solo para
+        # las familias elegidas: checkboxes de idioma (pedido explícito
+        # de la usuaria: buscador en el paso 1, checkboxes en el paso 2).
+        items_paso1 = st.multiselect(
+            "Qué notas exportar",
+            options=list(FAMILIAS_NOTA.keys()) + list(CODIGOS_SUELTOS.keys()),
+            key=f"notas_familias_{key}",
+            disabled=state["running"],
+            help="Elegí una o varias. Para las que tienen variante de idioma "
+                 "(Nota SRV, Descriptivo, Título, Luggage Waiver), después "
+                 "tildás abajo qué idiomas.",
+        )
+        codigos_a_exportar = []
+        for item in items_paso1:
+            if item in FAMILIAS_NOTA:
+                st.caption(f"**{item}** — idiomas:")
+                idiomas = FAMILIAS_NOTA[item]
+                cols = st.columns(len(idiomas))
+                for col, idioma in zip(cols, idiomas):
+                    tildado = col.checkbox(
+                        idioma, value=True,
+                        key=f"notas_idioma_{key}_{item}_{idioma}",
+                        disabled=state["running"],
+                    )
+                    if tildado:
+                        codigos_a_exportar.append(idiomas[idioma])
+            else:
+                codigos_a_exportar.append(CODIGOS_SUELTOS[item])
+        codigos_nota_env = ",".join(codigos_a_exportar) if codigos_a_exportar else None
+        if items_paso1 and not codigos_nota_env:
+            st.caption("⚠️ No queda ningún idioma tildado — destildá menos o elegí otra nota.")
+
     campos_completos = bool(sheet_url and username and password and base_url)
+    if cfg.get("notas_a_exportar"):
+        campos_completos = campos_completos and bool(codigos_nota_env)
 
     col_run, col_abort = st.columns(2)
     with col_run:
@@ -459,9 +519,11 @@ def render_script_tab(key, cfg):
                  "las filas restantes en PENDIENTE para retomar en otra corrida.",
         )
     if not campos_completos and not state["running"]:
+        falta_notas = cfg.get("notas_a_exportar") and not codigos_nota_env
         st.caption(
-            "Completá la URL del Sheet y la URL de Tourplan (y tu usuario/password "
-            "en ⚙️ Configuración) para poder ejecutar."
+            ("Elegí al menos una nota para exportar y c" if falta_notas else "C")
+            + "ompletá la URL del Sheet y la URL de Tourplan (y tu usuario/password "
+              "en ⚙️ Configuración) para poder ejecutar."
         )
 
     if run_clicked:
@@ -487,6 +549,7 @@ def render_script_tab(key, cfg):
             **({"TOURPLAN_MODO": modo_env} if modo_env else {}),
             **({"TOURPLAN_EDICION": edicion_env} if edicion_env else {}),
             **({"TOURPLAN_ELIMINAR": eliminar_env} if eliminar_env else {}),
+            **({"TOURPLAN_CODIGOS_NOTA": codigos_nota_env} if codigos_nota_env else {}),
             "PYTHONIOENCODING": "utf-8",
         })
 
