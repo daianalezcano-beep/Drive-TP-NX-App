@@ -133,7 +133,21 @@ def agregar_fila_sheet(ws, columnas, valores):
     columnas: encabezados actuales del Sheet (ej. ws.row_values(1)).
     valores: dict {nombre_de_columna: valor}.
     Devuelve el row_idx de la fila escrita.
+
+    El próximo row_idx se cachea en el propio objeto ws en vez de volver
+    a leer el Sheet entero (ws.get_all_values()) en cada llamada: un
+    script que agrega muchas filas seguidas en la misma corrida (ej.
+    Exportar Notas, una fila por producto × nota) terminaba haciendo esa
+    misma cantidad de lecturas a la API de Sheets y se quedaba sin cuota
+    ("Quota exceeded ... Read requests per minute"). Solo la primera
+    llamada de la corrida lee el Sheet; las siguientes cuentan en
+    memoria, asumiendo que nada más le agrega filas a esta hoja en
+    paralelo durante la misma corrida (cierto para las hojas de salida
+    de estos scripts, que son de un solo escritor por vez).
     """
-    row_idx = len(ws.get_all_values()) + 1
+    row_idx = getattr(ws, "_siguiente_row_idx", None)
+    if row_idx is None:
+        row_idx = len(ws.get_all_values()) + 1
     actualizar_fila_sheet(ws, row_idx, columnas, valores)
+    ws._siguiente_row_idx = row_idx + 1
     return row_idx
