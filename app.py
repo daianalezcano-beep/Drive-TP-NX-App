@@ -498,6 +498,15 @@ def _inyectar_css():
             min-width: 236px !important;
         }
 
+        /* El sidebar reserva arriba una franja fija de 60px
+           (stSidebarHeader) solo para el botón de contraer, que mide
+           28px — eso es lo que empuja "Scripts" hacia abajo. Se achica
+           la franja sin esconder el botón (sigue andando igual para
+           contraer/expandir). */
+        [data-testid="stSidebarHeader"] {
+            height: 40px !important;
+        }
+
         /* Botones primarios: Ejecutar y el script seleccionado del
            sidebar. Streamlit marca el <button> con kind="primary". */
         button[kind="primary"] {
