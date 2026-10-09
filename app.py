@@ -465,18 +465,33 @@ def _inyectar_css():
            (Running/Deploy/hamburguesa) más un padding-top grande en el
            contenedor principal para no taparla — con nuestro header
            propio (más abajo, position: sticky) eso deja un hueco vacío
-           antes de llegar a él. Se esconde esa barra nativa (no hace
-           falta en esta app) y se pone el padding-top en 0. A
-           propósito NO se toca stSidebarCollapsedControl (el botón
-           para contraer/expandir el sidebar): ese sigue visible, a
-           diferencia de apps que ocultan el sidebar entero.
+           antes de llegar a él.
+
+           OJO: esa misma barra (stHeader/stToolbar) es donde Streamlit
+           pone el botón para volver a abrir el sidebar cuando está
+           contraído (stExpandSidebarButton) — un display:none acá
+           también lo esconde a él (bug real, confirmado: sin ese
+           botón no hay forma de reabrir el sidebar). Por eso NO se
+           esconde stHeader/stToolbar entero: se esconden solo las
+           partes que no usamos (menú hamburguesa, Deploy, acciones de
+           toolbar) y se le saca a la barra su alto/fondo por default,
+           para que ocupe lo mínimo cuando no tiene nada que mostrar
+           pero deje pasar el botón de expandir cuando sí lo tiene.
            Selectores verificados contra Streamlit 1.37/1.65 — si una
            versión futura cambia estos data-testid, lo único que pasa
-           es que vuelve el hueco de arriba, no se rompe nada más. */
-        header[data-testid="stHeader"],
-        [data-testid="stToolbar"],
+           es que vuelve el hueco de arriba o el botón nativo, no se
+           rompe nada más. */
+        [data-testid="stToolbarActions"],
+        [data-testid="stAppDeployButton"],
+        [data-testid="stMainMenu"],
         [data-testid="stDecoration"] {
             display: none !important;
+        }
+        header[data-testid="stHeader"],
+        [data-testid="stToolbar"] {
+            background: transparent !important;
+            height: auto !important;
+            min-height: 0 !important;
         }
         .block-container,
         [data-testid="stMainBlockContainer"],
