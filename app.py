@@ -257,7 +257,20 @@ def _clasificar_estado(valor):
     EXPORTADO/PARCIAL son el vocabulario propio de Exportar Notas (ESTADO
     agregado por producto, no por fila de Tourplan como en los demás
     scripts): EXPORTADO se cuenta como OK (se exportaron bien todas las
-    notas configuradas) y PARCIAL como Error (al menos una nota falló)."""
+    notas configuradas) y PARCIAL como Error (al menos una nota falló).
+
+    FASE1_OK/FASE1_SKIP son el vocabulario propio de Fase 1 en los 3
+    scripts de Valorización con fases (Servicio Madre, Componente,
+    Tarifario estático) — lo escriben en la columna ESTADO de la misma
+    hoja PRODUCTOS que lee este contador (confirmado en
+    valorizacion_desde_madre.py). Ambos son un cierre sin error de esa
+    fila en Fase 1 (encontró servicios para procesar, o no encontró
+    ninguno pero tampoco falló nada) — se cuentan como OK. ERROR_F1 ya
+    cuenta como Error solo con el chequeo de arriba (empieza con
+    "ERROR"). Los estados de Fase 2 de estos scripts (OK_REVISAR,
+    SVS_MADRE_NO_ENCONTRADO, PENDIENTE_APLICAR) viven en una hoja
+    PCM_Detail aparte que este contador no lee, así que no hace falta
+    reconocerlos acá."""
     v = (valor or "").strip().upper()
     if v in ("PENDIENTE", "PENDING", "PEND"):
         return "Pendiente"
@@ -271,6 +284,8 @@ def _clasificar_estado(valor):
         return "OK"
     if v == "PARCIAL":
         return "Error"
+    if v in ("FASE1_OK", "FASE1_SKIP"):
+        return "OK"
     return "Otro"
 
 
