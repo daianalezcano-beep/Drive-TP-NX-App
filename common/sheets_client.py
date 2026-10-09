@@ -17,14 +17,36 @@ se revoque el permiso o se borre ese archivo.
 """
 
 import os
+import time
 
 import gspread
+from gspread.exceptions import APIError
 from gspread.utils import rowcol_to_a1
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+# Segundos de espera entre reintentos cuando Sheets responde 429 (cuota
+# de "Write requests per minute per user", ~60/min). La cuota se renueva
+# por minuto, así que los últimos reintentos esperan ~1 minuto.
+_ESPERAS_429 = (10, 20, 30, 60, 60)
+
+
+def _con_reintentos_429(funcion, *args, **kwargs):
+    """Ejecuta una escritura a Sheets; si la API responde 429 (cuota
+    excedida) espera y reintenta. Cualquier otro error se propaga igual."""
+    for espera in _ESPERAS_429:
+        try:
+            return funcion(*args, **kwargs)
+        except APIError as e:
+            if getattr(e.response, "status_code", None) != 429:
+                raise
+            print(f"[Sheets] Cuota de escritura excedida (429). "
+                  f"Reintentando en {espera}s...")
+            time.sleep(espera)
+    return funcion(*args, **kwargs)
 
 
 def _cargar_credenciales(credentials_path, token_path):
@@ -71,7 +93,7 @@ def asegurar_columnas(ws, columnas_requeridas):
     headers = ws.row_values(1)
     faltantes = [c for c in columnas_requeridas if c not in headers]
     if faltantes:
-        ws.update(range_name="A1", values=[headers + faltantes])
+        _con_reintentos_429(ws.update, range_name="A1", values=[headers + faltantes])
 
 
 def cargar_sheet(ws):
@@ -116,8 +138,8 @@ def actualizar_fila_sheet(ws, row_idx, columnas, valores):
         updates.append({"range": rowcol_to_a1(row_idx, col_idx), "values": [[valor]]})
     if updates:
         if row_idx > ws.row_count:
-            ws.add_rows(row_idx - ws.row_count)
-        ws.batch_update(updates)
+            _con_reintentos_429(ws.add_rows, row_idx - ws.row_count)
+        _con_reintentos_429(ws.batch_update, updates)
 
 
 def agregar_fila_sheet(ws, columnas, valores):
