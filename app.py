@@ -491,6 +491,31 @@ def _inyectar_css():
             display: none !important;
         }
 
+        /* Panel derecho: st.container(height=640) reserva ese espacio
+           vía flex-basis FIJO en su stLayoutWrapper (no en el bloque de
+           adentro) — por eso no alcanza con cambiarle el height al
+           bloque interno, hay que soltar el flex-basis del wrapper. Si
+           el contenido real es más corto (el caso más común), con el
+           flex-basis fijo quedaba un hueco vacío abajo, y en Windows el
+           riel del scroll se ve igual aunque no haga falta (en Mac se
+           autooculta cuando no hay overflow, por eso no se notaba acá).
+           Con max-height en vez de un tamaño fijo, la caja se ajusta al
+           contenido y solo aparece scroll si de verdad no entra todo.
+           El selector se apoya en el marcador que deja
+           _render_panel_derecho (ver tp-panel-derecho-marker) para
+           alcanzar ÚNICAMENTE ese wrapper — confirmado que no matchea
+           ningún otro contenedor de la página. */
+        [data-testid="stLayoutWrapper"]:has(
+            > [data-testid="stVerticalBlock"]
+            > [data-testid="stElementContainer"]:first-child
+            .tp-panel-derecho-marker
+        ) {
+            flex: 0 1 auto !important;
+            height: auto !important;
+            max-height: 640px !important;
+            overflow-y: auto !important;
+        }
+
         /* Sidebar: ancho aproximado ~236px (selector estable y de uso
            común para esto; no afecta nada fuera del propio sidebar). */
         [data-testid="stSidebar"] {
@@ -883,6 +908,12 @@ def _render_tab_cola(key, cfg, state, sheet_url):
 
 def _render_panel_derecho(key, cfg, state, sheet_url):
     with st.container(height=640, border=False):
+        # Marcador invisible: _inyectar_css() lo usa para encontrar ESTE
+        # contenedor puntual (vía :has()) y cambiarle el height fijo de
+        # Streamlit por un max-height — así la caja se ajusta al
+        # contenido cuando entra todo, y solo scrollea si de verdad no
+        # entra, en vez de dejar un hueco vacío abajo con la altura fija.
+        st.markdown('<div class="tp-panel-derecho-marker"></div>', unsafe_allow_html=True)
         tab_cola, tab_config = st.tabs(["Cola", "Config"])
 
         with tab_config:
