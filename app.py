@@ -461,6 +461,36 @@ def _inyectar_css():
     st.markdown(
         """
         <style>
+        /* Streamlit reserva arriba de todo su propia barra nativa
+           (Running/Deploy/hamburguesa) más un padding-top grande en el
+           contenedor principal para no taparla — con nuestro header
+           propio (más abajo, position: sticky) eso deja un hueco vacío
+           antes de llegar a él. Se esconde esa barra nativa (no hace
+           falta en esta app) y se pone el padding-top en 0. A
+           propósito NO se toca stSidebarCollapsedControl (el botón
+           para contraer/expandir el sidebar): ese sigue visible, a
+           diferencia de apps que ocultan el sidebar entero.
+           Selectores verificados contra Streamlit 1.37/1.65 — si una
+           versión futura cambia estos data-testid, lo único que pasa
+           es que vuelve el hueco de arriba, no se rompe nada más. */
+        header[data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"] {
+            display: none !important;
+        }
+        .block-container,
+        [data-testid="stMainBlockContainer"],
+        [data-testid="stMain"],
+        [data-testid="stAppViewContainer"] > section {
+            padding-top: 0 !important;
+        }
+        /* Los bloques <style> que inyectamos con st.markdown (este
+           mismo, y los de las tarjetas/consola/cajas) no deberían dejar
+           un renglón vacío en el flujo normal de la página. */
+        [data-testid="stElementContainer"]:has(style) {
+            display: none !important;
+        }
+
         /* Sidebar: ancho aproximado ~236px (selector estable y de uso
            común para esto; no afecta nada fuera del propio sidebar). */
         [data-testid="stSidebar"] {
