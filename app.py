@@ -12,7 +12,14 @@ Cada script corre como subproceso propio (ver README.md - "Por que
 subprocess"), parametrizado por variables de entorno. El usuario/password
 de Tourplan se guardan en ~/.tourplan-nx-app/config.json (ver
 common/user_config.py) para no tener que tipearlos en cada corrida.
+
+Layout (rediseño UI, rama rediseno-ui-streamlit): header fijo arriba +
+sidebar de navegación + centro (parámetros/consola del script elegido) +
+panel derecho con pestañas Cola/Config. Ver _inyectar_css() para todo el
+CSS custom, concentrado en un solo lugar porque los selectores de
+Streamlit (data-testid, etc.) son frágiles entre versiones.
 """
+import html
 import os
 import subprocess
 import sys
@@ -225,6 +232,16 @@ SCRIPTS = {
     },
 }
 
+# Colores de las 4 tarjetas de conteo del panel derecho (bg, texto). "Otro"
+# no tiene tarjeta — se muestra como texto chico al lado de la barra de
+# progreso, igual que antes del rediseño.
+_COLORES_ESTADO = {
+    "Pendiente":  ("#FFF4D6", "#7A5200"),
+    "En proceso": ("#DCEBFF", "#0B4A9E"),
+    "OK":         ("#DDF5E6", "#11643A"),
+    "Error":      ("#FFE0E0", "#A21B1B"),
+}
+
 
 def _clasificar_estado(valor):
     """Agrupa el valor crudo de la columna ESTADO (que en varios scripts
@@ -303,7 +320,7 @@ def _refrescar_conteo_notas(state, sheet_url, hoja):
     """Igual que _refrescar_conteo pero para la hoja de resultados por
     nota (EXPORTAR_NOTAS_RESULTADOS). Guarda las filas crudas (no un
     conteo ya agregado): el conteo que de verdad importa es el de la
-    selección de notas vigente en la UI (ver render_script_tab), que acá
+    selección de notas vigente en la UI (ver _render_centro), que acá
     todavía no se conoce — eso filtra por Codigo_Nota al mostrarlo."""
     try:
         ws = conectar_sheets(
@@ -318,9 +335,10 @@ def _refrescar_conteo_notas(state, sheet_url, hoja):
 
 def _chequear_pendientes_globales():
     """Chequeo único al abrir la app (no se repite en cada rerun de
-    Streamlit — ver render_aviso_pendientes): para cada script con una URL
-    de Sheet guardada en Configuración, cuenta filas Pendiente/En proceso.
-    Un error puntual leyendo un Sheet no bloquea el chequeo de los demás."""
+    Streamlit — ver _asegurar_pendientes_globales): para cada script con
+    una URL de Sheet guardada en Configuración, cuenta filas
+    Pendiente/En proceso. Un error puntual leyendo un Sheet no bloquea el
+    chequeo de los demás."""
     pendientes = []
     for key, cfg in SCRIPTS.items():
         if not cfg["script_path"].exists():
@@ -345,34 +363,76 @@ def _chequear_pendientes_globales():
     return pendientes
 
 
-def render_aviso_pendientes():
-    """Aviso arriba de todo si quedaron filas sin procesar de una corrida
-    anterior (abortada o cortada). El chequeo es una sola vez por sesión de
-    navegador (al abrir la app) — no depende del botón Refrescar de cada
-    script, que es para ver el progreso de una corrida activa."""
+def _asegurar_pendientes_globales():
+    """Calcula los pendientes una sola vez por sesión de navegador (igual
+    que antes del rediseño) y los deja en session_state. Ya no se muestra
+    como aviso arriba de toda la página: alimenta el chip ámbar del
+    header y la caja "Corridas sin terminar" del panel derecho."""
     if "_pendientes_globales" not in st.session_state:
         st.session_state["_pendientes_globales"] = _chequear_pendientes_globales()
 
-    pendientes = st.session_state["_pendientes_globales"]
-    if not pendientes:
-        return
 
-    st.warning("⚠️ Tenés corridas sin terminar:")
-    for item in pendientes:
-        col_txt, col_btn = st.columns([4, 1])
-        with col_txt:
-            partes = []
-            if item["pendiente"]:
-                partes.append(f"{item['pendiente']} PENDIENTE")
-            if item["procesando"]:
-                partes.append(f"{item['procesando']} en PROCESANDO (quedó a medias)")
-            st.markdown(f"**{item['label']}** — {', '.join(partes)}")
-        with col_btn:
-            if st.button("▶ Ir a este script", key=f"ir_a_{item['key']}", use_container_width=True):
-                st.session_state["selected_script"] = item["key"]
-                st.session_state["vista"] = "script"
-                st.rerun()
-    st.divider()
+def _hay_algo_corriendo():
+    """True si hay al menos un script con una corrida en curso en esta
+    sesión — se deriva solo leyendo el estado de los subprocesos
+    (state["running"] de cada _state_{key}), la app no mantiene una
+    sesión propia contra Tourplan. Se usa para el punto del header y
+    para decidir el run_every de los fragments."""
+    for k, v in st.session_state.items():
+        if k.startswith("_state_") and isinstance(v, dict) and v.get("running"):
+            return True
+    return False
+
+
+def _scripts_en_curso():
+    """Lista (key, label, started_at) de los scripts corriendo ahora
+    mismo, en cualquier pestaña — no solo el script visible."""
+    en_curso = []
+    for state_key, s in st.session_state.items():
+        if not state_key.startswith("_state_") or not isinstance(s, dict):
+            continue
+        if s.get("running"):
+            k = state_key[len("_state_"):]
+            cfg_k = SCRIPTS.get(k)
+            if cfg_k is None:
+                continue
+            en_curso.append((k, cfg_k["label"], s.get("started_at")))
+    return en_curso
+
+
+def _registrar_corridas_terminadas():
+    """Vigilante de solo lectura (regla de rediseño): recorre todos los
+    _state_{key} y, para cada corrida que ya terminó (finished=True) y
+    todavía no está anotada en el historial de la sesión, la agrega una
+    sola vez a st.session_state["_corridas_terminadas"]. No consulta
+    Sheets, no modifica running/finished/returncode ni ningún otro campo
+    de state (aparte de la propia bandera de "ya anotada"), y no muestra
+    nada — solo lee y deja un registro para que el panel derecho lo
+    pinte."""
+    historial = st.session_state.setdefault("_corridas_terminadas", [])
+    for state_key, state in st.session_state.items():
+        if not state_key.startswith("_state_") or not isinstance(state, dict):
+            continue
+        if not state.get("finished") or state.get("_anotada_en_historial"):
+            continue
+        key = state_key[len("_state_"):]
+        cfg = SCRIPTS.get(key)
+        if cfg is None:
+            continue
+        historial.append({
+            "key": key,
+            "label": cfg["label"],
+            "returncode": state.get("returncode"),
+            "hora": time.strftime("%H:%M"),
+        })
+        state["_anotada_en_historial"] = True
+
+
+def _formatear_hace(segundos):
+    minutos = max(0, int(segundos // 60))
+    if minutos < 1:
+        return "hace instantes"
+    return f"hace {minutos} min"
 
 
 def _leer_proceso(proc, state):
@@ -386,59 +446,348 @@ def _leer_proceso(proc, state):
     state["finished"] = True
 
 
-def render_script_tab(key, cfg):
-    st.subheader(cfg["label"])
-    st.caption(cfg["help"])
-    if cfg.get("warning"):
-        st.warning(cfg["warning"])
+def _inyectar_css():
+    """Único lugar con CSS custom de toda la app (pedido explícito del
+    rediseño: los selectores de Streamlit — data-testid, atributos
+    "kind", etc. — son frágiles y cambian entre versiones, mejor tenerlos
+    todos juntos y documentados acá que desperdigados).
 
-    if not cfg["script_path"].exists():
-        st.info("Este script todavía no fue vendorizado en el repo — va a estar disponible en la app cuando se pegue el código.")
-        return
-
-    state_key = f"_state_{key}"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = {
-            "running": False,
-            "finished": False,
-            "log_lines": [],
-            "returncode": None,
-            "proc": None,
-            "stop_file": None,
-            "abort_requested": False,
+    A propósito NO hay CSS que dependa de la POSICIÓN de una columna (ej.
+    "la segunda columna de tal fila"): Streamlit no da un selector
+    estable para eso, y un cambio así podría romper layouts sin relación
+    (como las columnas de idiomas de Exportar Notas, que también son
+    st.columns). Por eso el ancho del panel derecho se logra con la
+    proporción de st.columns (ver _render_script_tab), no con CSS."""
+    st.markdown(
+        """
+        <style>
+        /* Sidebar: ancho aproximado ~236px (selector estable y de uso
+           común para esto; no afecta nada fuera del propio sidebar). */
+        [data-testid="stSidebar"] {
+            width: 236px !important;
+            min-width: 236px !important;
         }
-    state = st.session_state[state_key]
 
-    col_sheet, col_refresh = st.columns([4, 1])
-    with col_sheet:
-        sheet_url = st.text_input(
-            "URL del Google Sheet",
-            value=user_config.sheet_url_default(key),
-            key=f"sheet_url_{key}",
-            disabled=state["running"],
-            help="Se precarga con la URL guardada en Configuración para este script, si hay una. Siempre editable.",
+        /* Botones primarios: Ejecutar y el script seleccionado del
+           sidebar. Streamlit marca el <button> con kind="primary". */
+        button[kind="primary"] {
+            background-color: #D63030 !important;
+            border-color: #D63030 !important;
+        }
+        button[kind="primary"]:hover {
+            background-color: #B82828 !important;
+            border-color: #B82828 !important;
+        }
+
+        /* Header fijo */
+        .tp-header {
+            position: sticky;
+            top: 0;
+            z-index: 999;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 48px;
+            padding: 0 6px;
+            background: #FFFFFF;
+            border-bottom: 1px solid #D5D9E2;
+            margin-bottom: 0.6rem;
+        }
+        .tp-header-izq {
+            font-size: 1.15rem;
+            font-weight: 700;
+        }
+        .tp-header-der {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        .tp-chip {
+            padding: 4px 12px;
+            border-radius: 999px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .tp-chip-ambar {
+            background: #FFF4D6;
+            color: #7A5200;
+        }
+        .tp-sesion {
+            font-size: 0.85rem;
+            color: #31333F;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            white-space: nowrap;
+        }
+        .tp-punto {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .tp-punto-verde { background: #1DB954; }
+        .tp-punto-gris  { background: #9AA0AC; }
+        .tp-punto-azul  { background: #0B4A9E; }
+        .tp-badge {
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+        .tp-badge-prod { background: #FFE0E0; color: #A21B1B; }
+        .tp-badge-otro { background: #E5E7EB; color: #374151; }
+
+        /* Tarjetas de conteo (panel derecho, pestaña Cola) */
+        .tp-tarjetas {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 0.4rem;
+        }
+        .tp-tarjeta {
+            flex: 1 1 calc(50% - 8px);
+            min-width: 100px;
+            border-radius: 8px;
+            padding: 8px 10px;
+        }
+        .tp-tarjeta-etiqueta {
+            font-size: 0.72rem;
+            font-weight: 600;
+        }
+        .tp-tarjeta-valor {
+            font-size: 1.35rem;
+            font-weight: 700;
+            line-height: 1.5rem;
+        }
+
+        /* Consola */
+        .tp-consola {
+            display: flex;
+            flex-direction: column-reverse;
+            overflow-y: auto;
+            height: 360px;
+            background: #F0F2F6;
+            color: #31333F;
+            font-family: "Source Code Pro", "SFMono-Regular", Consolas, "Courier New", monospace;
+            font-size: 12.5px;
+            line-height: 21px;
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid #D5D9E2;
+        }
+        .tp-consola-linea {
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .tp-consola-vacia {
+            color: #6b7280;
+        }
+
+        /* Cajas del panel derecho ("Ejecutando ahora") */
+        .tp-caja {
+            border-radius: 8px;
+            padding: 10px 12px;
+            margin-bottom: 0.6rem;
+        }
+        .tp-caja-ejecutando {
+            background: #EEF5FF;
+            border: 1px solid #B9D4F7;
+        }
+        .tp-caja-titulo {
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+        .tp-caja-subtitulo {
+            font-weight: 600;
+            margin-top: 8px;
+            margin-bottom: 4px;
+        }
+        .tp-caja-fila {
+            font-size: 0.85rem;
+            padding: 2px 0;
+        }
+        .tp-caja-vacia {
+            color: #6b7280;
+        }
+        .tp-caja-hace {
+            color: #6b7280;
+            font-size: 0.8rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_tarjetas_estado(conteo):
+    partes = []
+    for etiqueta in ("Pendiente", "En proceso", "OK", "Error"):
+        bg, fg = _COLORES_ESTADO[etiqueta]
+        partes.append(
+            f'<div class="tp-tarjeta" style="background:{bg};color:{fg};">'
+            f'<div class="tp-tarjeta-etiqueta">{html.escape(etiqueta)}</div>'
+            f'<div class="tp-tarjeta-valor">{conteo[etiqueta]}</div>'
+            f'</div>'
         )
-    with col_refresh:
-        st.markdown("<div style='height: 1.9em'></div>", unsafe_allow_html=True)
-        refrescar_clicked = st.button(
-            "🔄 Refrescar",
-            key=f"refrescar_{key}",
-            disabled=state["running"] or not sheet_url,
-            use_container_width=True,
-            help="Lee el Sheet ahora y cuenta cuántas filas están Pendiente/OK/Error.",
+    st.markdown(f'<div class="tp-tarjetas">{"".join(partes)}</div>', unsafe_allow_html=True)
+
+
+def _render_consola_html(log_lines):
+    lineas = log_lines[-500:]
+    if lineas:
+        contenido = "".join(
+            f'<div class="tp-consola-linea">{html.escape(linea.rstrip(chr(10)))}</div>'
+            for linea in reversed(lineas)
+        )
+    else:
+        contenido = (
+            '<div class="tp-consola-linea tp-consola-vacia">'
+            'Sin ejecución todavía. El log aparece acá y sigue la última línea.'
+            '</div>'
+        )
+    st.markdown(f'<div class="tp-consola">{contenido}</div>', unsafe_allow_html=True)
+
+
+def render_header(selected_key):
+    """Header fino y fijo arriba de todo — fragment con run_every
+    dinámico (1 si hay algo corriendo en cualquier script, None si no),
+    recalculado en cada rerun completo."""
+    run_every = 1 if _hay_algo_corriendo() else None
+
+    @st.fragment(run_every=run_every)
+    def _fragment():
+        pendientes = st.session_state.get("_pendientes_globales") or []
+        chip_pendientes = (
+            '<span class="tp-chip tp-chip-ambar">Pendientes de ejecutar</span>'
+            if pendientes else ""
         )
 
-    if refrescar_clicked:
+        if _hay_algo_corriendo():
+            sesion_html = (
+                '<span class="tp-sesion"><span class="tp-punto tp-punto-verde"></span>'
+                'Sesión Tourplan activa</span>'
+            )
+        else:
+            sesion_html = (
+                '<span class="tp-sesion"><span class="tp-punto tp-punto-gris"></span>'
+                'Sin sesión activa</span>'
+            )
+
+        cfg = SCRIPTS[selected_key]
+        base_url_actual = st.session_state.get(f"url_{selected_key}", cfg["base_url"])
+        if base_url_actual == PRODUCCION_URL:
+            badge_entorno = '<span class="tp-badge tp-badge-prod">PRODUCCIÓN</span>'
+        else:
+            badge_entorno = '<span class="tp-badge tp-badge-otro">URL DISTINTA</span>'
+
+        st.markdown(
+            '<div class="tp-header">'
+            '<div class="tp-header-izq">Tourplan NX · Herramientas</div>'
+            f'<div class="tp-header-der">{chip_pendientes}{sesion_html}{badge_entorno}</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+    _fragment()
+
+
+def _render_caja_ejecutando(en_curso):
+    """Caja "Ejecutando ahora" + "Terminaron en esta sesión" — ambas son
+    puro texto (sin botones), así que se arman como un solo bloque HTML
+    con color propio, sin depender de ningún selector de Streamlit."""
+    filas = []
+    if en_curso:
+        ahora = time.time()
+        for _k, label, started_at in en_curso:
+            hace = _formatear_hace(ahora - started_at) if started_at else "hace instantes"
+            filas.append(
+                '<div class="tp-caja-fila"><span class="tp-punto tp-punto-azul"></span> '
+                f'{html.escape(label)} <span class="tp-caja-hace">{html.escape(hace)}</span></div>'
+            )
+    else:
+        filas.append('<div class="tp-caja-fila tp-caja-vacia">Nada en ejecución.</div>')
+
+    _registrar_corridas_terminadas()
+    terminadas = st.session_state.get("_corridas_terminadas", [])
+    filas_terminadas = []
+    for item in reversed(terminadas[-10:]):
+        rc = item["returncode"]
+        if rc == 0:
+            texto, color = "Terminó", "#11643A"
+        elif rc == ABORT_EXIT_CODE:
+            texto, color = "Abortado", "#7A5200"
+        else:
+            texto, color = "Con error", "#A21B1B"
+        filas_terminadas.append(
+            f'<div class="tp-caja-fila"><span class="tp-punto" style="background:{color};"></span> '
+            f'{html.escape(item["label"])} — '
+            f'<span style="color:{color};font-weight:600;">{texto}</span> '
+            f'<span class="tp-caja-hace">{html.escape(item["hora"])}</span></div>'
+        )
+
+    bloque_terminadas = ""
+    if filas_terminadas:
+        bloque_terminadas = (
+            '<div class="tp-caja-subtitulo">Terminaron en esta sesión</div>'
+            + "".join(filas_terminadas)
+        )
+
+    st.markdown(
+        '<div class="tp-caja tp-caja-ejecutando">'
+        '<div class="tp-caja-titulo">Ejecutando ahora</div>'
+        + "".join(filas)
+        + bloque_terminadas
+        + '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_caja_corridas_sin_terminar(en_curso):
+    """Contenido que antes era render_aviso_pendientes() (el banner
+    arriba de toda la página) — mismo cálculo (_pendientes_globales, una
+    sola vez por sesión), mismo botón "Ir", ahora en un st.container con
+    borde dentro del panel derecho. Oculta los scripts que están
+    corriendo en este momento (esos ya se ven en "Ejecutando ahora")."""
+    st.markdown("**Corridas sin terminar**")
+    pendientes = st.session_state.get("_pendientes_globales") or []
+    keys_en_curso = {k for k, _label, _started in en_curso}
+    pendientes_visibles = [p for p in pendientes if p["key"] not in keys_en_curso]
+
+    with st.container(border=True):
+        if not pendientes_visibles:
+            st.caption("Nada pendiente de corridas anteriores.")
+            return
+        for item in pendientes_visibles:
+            col_txt, col_btn = st.columns([4, 1])
+            with col_txt:
+                partes = []
+                if item["pendiente"]:
+                    partes.append(f"{item['pendiente']} PENDIENTE")
+                if item["procesando"]:
+                    partes.append(f"{item['procesando']} en PROCESANDO (quedó a medias)")
+                st.markdown(f"**{item['label']}** — {', '.join(partes)}")
+            with col_btn:
+                if st.button("Ir", key=f"ir_a_{item['key']}", use_container_width=True):
+                    st.session_state["selected_script"] = item["key"]
+                    st.rerun()
+
+
+def _render_tab_cola(key, cfg, state, sheet_url):
+    # Refresco periódico mientras corre (mismo intervalo de siempre — no
+    # se toca, ver _refrescar_conteo/_refrescar_conteo_notas).
+    if state["running"] and time.time() - state.get("conteo_ts", 0) > 5:
         _refrescar_conteo(state, sheet_url, cfg["sheet"])
         if cfg.get("sheet_resultados"):
             _refrescar_conteo_notas(state, sheet_url, cfg["sheet_resultados"])
 
     if state.get("conteo"):
         conteo = state["conteo"]
-        cols = st.columns(5)
-        for col, (etiqueta, n) in zip(cols, conteo.items()):
-            col.metric(etiqueta, n)
-
+        _render_tarjetas_estado(conteo)
         total = sum(conteo.values())
         if total > 0:
             # OK + Error + En proceso, no "total - Pendiente": con celdas
@@ -446,147 +795,206 @@ def render_script_tab(key, cfg):
             # _clasificar_estado), "total - Pendiente" las contaría como
             # procesadas sin haberlo sido.
             avanzadas = conteo["OK"] + conteo["Error"] + conteo["En proceso"]
-            st.progress(
-                avanzadas / total,
-                text=f"{avanzadas}/{total} procesadas",
-            )
+            st.progress(avanzadas / total, text=f"{avanzadas}/{total} procesadas")
+            st.caption(f"Otro: {conteo['Otro']}")
     elif state.get("conteo_error"):
         st.error(f"No pude leer el Sheet: {state['conteo_error']}")
 
-    username, password = user_config.tp_credenciales_default()
-    if not (username and password):
-        st.warning(
-            "Falta cargar tu usuario/contraseña de Tourplan en ⚙️ Configuración "
-            "(se completan solos acá una vez guardados)."
-        )
+    if cfg.get("sheet_resultados"):
+        # Progreso de notas para la selección vigente (ver _render_centro):
+        # cuántas de ESOS códigos ya están exportadas en
+        # EXPORTAR_NOTAS_RESULTADOS, sobre el total esperado (productos
+        # del Sheet × notas elegidas).
+        notas_filas = state.get("notas_filas")
+        codigos_a_exportar = state.get("codigos_a_exportar") or []
+        if notas_filas is not None and codigos_a_exportar:
+            codigos_set = set(codigos_a_exportar)
+            filas_sel = [
+                f for f in notas_filas
+                if (f.get("Codigo_Nota") or "").strip().upper() in codigos_set
+            ]
+            conteo_notas = _contar_estados_notas(filas_sel)
+            total_productos = sum(state["conteo"].values()) if state.get("conteo") else 0
+            esperado = total_productos * len(codigos_set)
 
-    base_url = st.text_input(
-        "URL de Tourplan",
-        value=cfg["base_url"],
-        key=f"url_{key}",
-        disabled=state["running"],
-        help="Viene precargada con producción. Cambiala solo si querés probar deliberadamente contra el ambiente de Test.",
-    )
-
-    modo_options = cfg.get("modo_options")
-    if modo_options:
-        modo_label = st.radio(
-            "Modo",
-            [label for label, _ in modo_options],
-            key=f"modo_{key}",
-            disabled=state["running"],
-        )
-        modo_env = dict(modo_options)[modo_label]
-    else:
-        st.info(cfg.get(
-            "no_modo_info",
-            "ℹ️ Este script no tiene modo de solo lectura: cada fila PENDIENTE se "
-            "copia y linkea directo, sin vista previa antes de guardar.",
-        ))
-        modo_env = None
-
-    edicion_options = cfg.get("edicion_options")
-    if edicion_options:
-        edicion_label = st.radio(
-            "Si el código de nota ya existe en el producto",
-            [label for label, _ in edicion_options],
-            key=f"edicion_{key}",
-            disabled=state["running"],
-        )
-        edicion_env = dict(edicion_options)[edicion_label]
-    else:
-        edicion_env = None
-
-    eliminar_options = cfg.get("eliminar_options")
-    if eliminar_options:
-        eliminar_label = st.radio(
-            "Acción sobre cada producto",
-            [label for label, _ in eliminar_options],
-            key=f"eliminar_{key}",
-            disabled=state["running"],
-        )
-        eliminar_env = dict(eliminar_options)[eliminar_label]
-    else:
-        eliminar_env = None
-
-    codigos_nota_env = None
-    if cfg.get("notas_a_exportar"):
-        # Paso 1 — buscador: familias (con variante de idioma) + códigos
-        # sueltos (sin idioma), todos al mismo nivel. Paso 2 — solo para
-        # las familias elegidas: checkboxes de idioma (pedido explícito
-        # de la usuaria: buscador en el paso 1, checkboxes en el paso 2).
-        items_paso1 = st.multiselect(
-            "Qué notas exportar",
-            options=list(FAMILIAS_NOTA.keys()) + list(CODIGOS_SUELTOS.keys()),
-            key=f"notas_familias_{key}",
-            disabled=state["running"],
-            help="Elegí una o varias. Para las que tienen variante de idioma "
-                 "(Nota SRV, Descriptivo, Titulo, Luggage Waiver), después "
-                 "tildás abajo qué idiomas.",
-        )
-        codigos_a_exportar = []
-        for item in items_paso1:
-            if item in FAMILIAS_NOTA:
-                st.caption(f"**{item}** — idiomas:")
-                idiomas = FAMILIAS_NOTA[item]
-                cols = st.columns(len(idiomas))
-                for col, idioma in zip(cols, idiomas):
-                    tildado = col.checkbox(
-                        idioma, value=True,
-                        key=f"notas_idioma_{key}_{item}_{idioma}",
-                        disabled=state["running"],
-                    )
-                    if tildado:
-                        codigos_a_exportar.append(idiomas[idioma])
-            else:
-                codigos_a_exportar.append(CODIGOS_SUELTOS[item])
-        codigos_nota_env = ",".join(codigos_a_exportar) if codigos_a_exportar else None
-        if items_paso1 and not codigos_nota_env:
-            st.caption("⚠️ No queda ningún idioma tildado — destildá menos o elegí otra nota.")
-
-        # Progreso de notas para la selección de arriba: cuántas de ESOS
-        # códigos ya están exportadas en EXPORTAR_NOTAS_RESULTADOS, sobre
-        # el total esperado (productos del Sheet × notas elegidas). Antes
-        # mostraba el histórico de TODA la hoja (cualquier nota, de
-        # cualquier corrida pasada) y no guardaba relación con el conteo
-        # de productos de arriba — confuso. Necesita conocer la selección
-        # vigente, por eso va acá y no en el bloque de conteo de arriba.
-        if cfg.get("sheet_resultados"):
-            notas_filas = state.get("notas_filas")
-            if notas_filas is not None and codigos_a_exportar:
-                codigos_set = set(codigos_a_exportar)
-                filas_sel = [
-                    f for f in notas_filas
-                    if (f.get("Codigo_Nota") or "").strip().upper() in codigos_set
-                ]
-                conteo_notas = _contar_estados_notas(filas_sel)
-                total_productos = sum(state["conteo"].values()) if state.get("conteo") else 0
-                esperado = total_productos * len(codigos_set)
-
-                st.caption(
-                    f"Notas exportadas para la selección de arriba — "
-                    f"{len(codigos_set)} nota(s) × {total_productos} producto(s) "
-                    f"= {esperado} esperadas:"
+            st.caption(
+                f"Notas exportadas para la selección — "
+                f"{len(codigos_set)} nota(s) × {total_productos} producto(s) "
+                f"= {esperado} esperadas:"
+            )
+            cols_notas = st.columns(3)
+            for col, (etiqueta, n) in zip(cols_notas, conteo_notas.items()):
+                col.metric(etiqueta, n)
+            if esperado > 0:
+                st.progress(
+                    min(conteo_notas["OK"] / esperado, 1.0),
+                    text=f"{conteo_notas['OK']}/{esperado} notas exportadas OK",
                 )
-                cols_notas = st.columns(3)
-                for col, (etiqueta, n) in zip(cols_notas, conteo_notas.items()):
-                    col.metric(etiqueta, n)
-                if esperado > 0:
-                    st.progress(
-                        min(conteo_notas["OK"] / esperado, 1.0),
-                        text=f"{conteo_notas['OK']}/{esperado} notas exportadas OK",
-                    )
-            elif notas_filas is not None:
-                st.caption("Elegí al menos una nota arriba para ver el progreso de notas.")
-            elif state.get("conteo_notas_error"):
-                st.error(f"No pude leer el histórico de notas: {state['conteo_notas_error']}")
+        elif notas_filas is not None:
+            st.caption("Elegí al menos una nota arriba para ver el progreso de notas.")
+        elif state.get("conteo_notas_error"):
+            st.error(f"No pude leer el histórico de notas: {state['conteo_notas_error']}")
+
+    st.divider()
+
+    en_curso = _scripts_en_curso()
+    _render_caja_ejecutando(en_curso)
+    _render_caja_corridas_sin_terminar(en_curso)
+
+
+def _render_panel_derecho(key, cfg, state, sheet_url):
+    with st.container(height=640, border=False):
+        tab_cola, tab_config = st.tabs(["Cola", "Config"])
+
+        with tab_config:
+            # Fuera del fragment a propósito: Guardar dispara un rerun
+            # completo normal, así el centro (credenciales, URL default
+            # del Sheet) se actualiza al toque en vez de quedar un paso
+            # atrás hasta el próximo tick del fragment de al lado.
+            render_configuracion()
+
+        with tab_cola:
+            run_every = 1 if _hay_algo_corriendo() else None
+
+            @st.fragment(run_every=run_every)
+            def _fragment_cola():
+                _render_tab_cola(key, cfg, state, sheet_url)
+
+            _fragment_cola()
+
+
+def _render_centro(key, cfg, state):
+    st.subheader(cfg["label"])
+    st.caption(cfg["help"])
+
+    col_exp, col_run, col_abort = st.columns([5, 1, 1])
+
+    with col_exp:
+        with st.expander("Parámetros", expanded=not state["running"]):
+            col_sheet, col_refresh = st.columns([4, 1])
+            with col_sheet:
+                sheet_url = st.text_input(
+                    "URL del Google Sheet",
+                    value=user_config.sheet_url_default(key),
+                    key=f"sheet_url_{key}",
+                    disabled=state["running"],
+                    help="Se precarga con la URL guardada en Configuración para este script, si hay una. Siempre editable.",
+                )
+            with col_refresh:
+                st.markdown("<div style='height: 1.9em'></div>", unsafe_allow_html=True)
+                refrescar_clicked = st.button(
+                    "🔄 Refrescar",
+                    key=f"refrescar_{key}",
+                    disabled=state["running"] or not sheet_url,
+                    use_container_width=True,
+                    help="Lee el Sheet ahora y cuenta cuántas filas están Pendiente/OK/Error.",
+                )
+            if refrescar_clicked:
+                _refrescar_conteo(state, sheet_url, cfg["sheet"])
+                if cfg.get("sheet_resultados"):
+                    _refrescar_conteo_notas(state, sheet_url, cfg["sheet_resultados"])
+
+            base_url = st.text_input(
+                "URL de Tourplan",
+                value=cfg["base_url"],
+                key=f"url_{key}",
+                disabled=state["running"],
+                help="Viene precargada con producción. Cambiala solo si querés probar deliberadamente contra el ambiente de Test.",
+            )
+
+            modo_options = cfg.get("modo_options")
+            if modo_options:
+                modo_label = st.radio(
+                    "Modo",
+                    [label for label, _ in modo_options],
+                    key=f"modo_{key}",
+                    disabled=state["running"],
+                )
+                modo_env = dict(modo_options)[modo_label]
+            else:
+                st.info(cfg.get(
+                    "no_modo_info",
+                    "ℹ️ Este script no tiene modo de solo lectura: cada fila PENDIENTE se "
+                    "copia y linkea directo, sin vista previa antes de guardar.",
+                ))
+                modo_env = None
+
+            edicion_options = cfg.get("edicion_options")
+            if edicion_options:
+                edicion_label = st.radio(
+                    "Si el código de nota ya existe en el producto",
+                    [label for label, _ in edicion_options],
+                    key=f"edicion_{key}",
+                    disabled=state["running"],
+                )
+                edicion_env = dict(edicion_options)[edicion_label]
+            else:
+                edicion_env = None
+
+            eliminar_options = cfg.get("eliminar_options")
+            if eliminar_options:
+                eliminar_label = st.radio(
+                    "Acción sobre cada producto",
+                    [label for label, _ in eliminar_options],
+                    key=f"eliminar_{key}",
+                    disabled=state["running"],
+                )
+                eliminar_env = dict(eliminar_options)[eliminar_label]
+            else:
+                eliminar_env = None
+
+            codigos_nota_env = None
+            if cfg.get("notas_a_exportar"):
+                # Paso 1 — buscador: familias (con variante de idioma) + códigos
+                # sueltos (sin idioma), todos al mismo nivel. Paso 2 — solo para
+                # las familias elegidas: checkboxes de idioma (pedido explícito
+                # de la usuaria: buscador en el paso 1, checkboxes en el paso 2).
+                items_paso1 = st.multiselect(
+                    "Qué notas exportar",
+                    options=list(FAMILIAS_NOTA.keys()) + list(CODIGOS_SUELTOS.keys()),
+                    key=f"notas_familias_{key}",
+                    disabled=state["running"],
+                    help="Elegí una o varias. Para las que tienen variante de idioma "
+                         "(Nota SRV, Descriptivo, Titulo, Luggage Waiver), después "
+                         "tildás abajo qué idiomas.",
+                )
+                codigos_a_exportar = []
+                for item in items_paso1:
+                    if item in FAMILIAS_NOTA:
+                        st.caption(f"**{item}** — idiomas:")
+                        idiomas = FAMILIAS_NOTA[item]
+                        cols = st.columns(len(idiomas))
+                        for col, idioma in zip(cols, idiomas):
+                            tildado = col.checkbox(
+                                idioma, value=True,
+                                key=f"notas_idioma_{key}_{item}_{idioma}",
+                                disabled=state["running"],
+                            )
+                            if tildado:
+                                codigos_a_exportar.append(idiomas[idioma])
+                    else:
+                        codigos_a_exportar.append(CODIGOS_SUELTOS[item])
+                codigos_nota_env = ",".join(codigos_a_exportar) if codigos_a_exportar else None
+                if items_paso1 and not codigos_nota_env:
+                    st.caption("⚠️ No queda ningún idioma tildado — destildá menos o elegí otra nota.")
+                # Se guarda en state para que el panel derecho (_render_tab_cola,
+                # que corre en otra columna/fragment) pueda calcular el
+                # progreso de notas sobre la selección vigente.
+                state["codigos_a_exportar"] = codigos_a_exportar
+
+            username, password = user_config.tp_credenciales_default()
+            if not (username and password):
+                st.warning(
+                    "Falta cargar tu usuario/contraseña de Tourplan en ⚙️ Configuración "
+                    "(se completan solos acá una vez guardados)."
+                )
 
     campos_completos = bool(sheet_url and username and password and base_url)
     if cfg.get("notas_a_exportar"):
         campos_completos = campos_completos and bool(codigos_nota_env)
 
-    col_run, col_abort = st.columns(2)
     with col_run:
+        st.markdown("<div style='height: 1.9em'></div>", unsafe_allow_html=True)
         run_clicked = st.button(
             "Ejecutar",
             key=f"run_{key}",
@@ -595,6 +1003,7 @@ def render_script_tab(key, cfg):
             use_container_width=True,
         )
     with col_abort:
+        st.markdown("<div style='height: 1.9em'></div>", unsafe_allow_html=True)
         abort_clicked = st.button(
             "⏹ Abortar",
             key=f"abort_{key}",
@@ -612,6 +1021,7 @@ def render_script_tab(key, cfg):
         )
 
     if run_clicked:
+        state["mensaje_resultado"] = None
         run_dir = Path(tempfile.mkdtemp(prefix=f"tourplan_{key}_"))
         ss_dir = run_dir / "screenshots"
         ss_dir.mkdir(exist_ok=True)
@@ -658,6 +1068,7 @@ def render_script_tab(key, cfg):
             "proc": proc,
             "stop_file": stop_file,
             "abort_requested": False,
+            "started_at": time.time(),
         })
         threading.Thread(target=_leer_proceso, args=(proc, state), daemon=True).start()
         st.rerun()
@@ -675,44 +1086,113 @@ def render_script_tab(key, cfg):
             "Puede tardar hasta un minuto — las filas no procesadas quedan en PENDIENTE."
         )
 
-    log_placeholder = st.empty()
-    if state["log_lines"]:
-        log_placeholder.code("".join(state["log_lines"][-500:]), language=None)
+    run_every = 1 if _hay_algo_corriendo() else None
 
-    if state["running"] and state["finished"]:
-        state["running"] = False
-        rc = state["returncode"]
-        _refrescar_conteo(state, sheet_url, cfg["sheet"])
-        if cfg.get("sheet_resultados"):
-            _refrescar_conteo_notas(state, sheet_url, cfg["sheet_resultados"])
-
-        if rc == 0:
-            st.success(f"Terminó OK (código de salida {rc}). Revisá el resultado en el Sheet.")
-        elif rc == ABORT_EXIT_CODE:
-            st.info(
-                "⏸️ Abortado. Las filas que no llegó a procesar quedaron en PENDIENTE — "
-                "volvé a correr sobre el mismo Sheet más adelante para retomar."
-            )
-        else:
-            st.error(
-                f"El proceso terminó con error (código de salida {rc}). "
-                "Revisá el log arriba."
-            )
-
-    if state["running"]:
-        if time.time() - state.get("conteo_ts", 0) > 5:
+    @st.fragment(run_every=run_every)
+    def _fragment_consola():
+        # Detección de corrida terminada (antes vivía en el bucle
+        # time.sleep(1)+st.rerun() de abajo de todo; ahora el mismo
+        # chequeo corre en cada tick del fragment). El st.rerun() de acá
+        # es con scope default ("app"): un rerun COMPLETO para que los
+        # botones Ejecutar/Abortar y el header se rehabiliten — ver nota
+        # de mensaje_resultado más abajo.
+        if state["running"] and state["finished"]:
+            state["running"] = False
+            rc = state["returncode"]
             _refrescar_conteo(state, sheet_url, cfg["sheet"])
             if cfg.get("sheet_resultados"):
                 _refrescar_conteo_notas(state, sheet_url, cfg["sheet_resultados"])
-        time.sleep(1)
-        st.rerun()
+
+            if rc == 0:
+                state["mensaje_resultado"] = (
+                    "success",
+                    f"Terminó OK (código de salida {rc}). Revisá el resultado en el Sheet.",
+                )
+            elif rc == ABORT_EXIT_CODE:
+                state["mensaje_resultado"] = (
+                    "info",
+                    "⏸️ Abortado. Las filas que no llegó a procesar quedaron en PENDIENTE — "
+                    "volvé a correr sobre el mismo Sheet más adelante para retomar.",
+                )
+            else:
+                state["mensaje_resultado"] = (
+                    "error",
+                    f"El proceso terminó con error (código de salida {rc}). "
+                    "Revisá el log arriba.",
+                )
+            st.rerun()
+
+        col_titulo, col_descarga = st.columns([4, 1])
+        with col_titulo:
+            estado_txt = "" if state["running"] else " &nbsp; En espera"
+            st.markdown(f"**Consola**{estado_txt}", unsafe_allow_html=True)
+        with col_descarga:
+            st.download_button(
+                "Descargar",
+                data="".join(state["log_lines"]),
+                file_name=f"{key}_log.txt",
+                mime="text/plain",
+                key=f"descargar_{key}",
+                use_container_width=True,
+            )
+
+        _render_consola_html(state["log_lines"])
+        st.caption("Siguiendo la última línea")
+
+        # El mensaje queda guardado en state (no es un chequeo puntual
+        # de running/finished) para que siga visible después del
+        # st.rerun() completo de arriba, que ya corre con running=False.
+        mensaje = state.get("mensaje_resultado")
+        if mensaje:
+            tipo, texto = mensaje
+            getattr(st, tipo)(texto)
+
+    _fragment_consola()
+
+    return sheet_url
+
+
+def render_script_tab(key, cfg):
+    state_key = f"_state_{key}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = {
+            "running": False,
+            "finished": False,
+            "log_lines": [],
+            "returncode": None,
+            "proc": None,
+            "stop_file": None,
+            "abort_requested": False,
+            "started_at": None,
+            "mensaje_resultado": None,
+            "_anotada_en_historial": False,
+        }
+    state = st.session_state[state_key]
+
+    render_header(key)
+
+    if cfg.get("warning"):
+        st.warning(cfg["warning"])
+
+    if not cfg["script_path"].exists():
+        st.info("Este script todavía no fue vendorizado en el repo — va a estar disponible en la app cuando se pegue el código.")
+        return
+
+    col_centro, col_derecha = st.columns([3, 1], gap="medium")
+
+    with col_centro:
+        sheet_url = _render_centro(key, cfg, state)
+
+    with col_derecha:
+        _render_panel_derecho(key, cfg, state, sheet_url)
 
 
 def render_configuracion():
-    """Pantalla de Configuración: se completa una vez por PC. Guarda en
+    """Formulario de Configuración: se completa una vez por PC. Guarda en
     ~/.tourplan-nx-app/config.json (ver common/user_config.py) — nunca en
-    el repo compartido, para no pisarse entre personas."""
-    st.header("Configuración")
+    el repo compartido, para no pisarse entre personas. Ahora vive en la
+    pestaña "Config" del panel derecho (antes era una "vista" separada a
+    pantalla completa, accesible desde un botón del sidebar)."""
     st.caption(
         "Se guarda en esta computadora (no se sube al repositorio ni se comparte "
         "con el resto del equipo)."
@@ -774,29 +1254,19 @@ def render_configuracion():
 def render_sidebar_nav():
     """Sidebar agrupado por categoría. Guarda la selección en
     st.session_state para que no se resetee al interactuar con los inputs
-    del script elegido (esos widgets viven en el área principal, no acá)."""
+    del script elegido (esos widgets viven en el área principal, no acá).
+    Ya no tiene botón de Configuración: Config pasa a ser una pestaña del
+    panel derecho, no una vista aparte."""
     if "selected_script" not in st.session_state:
         st.session_state["selected_script"] = next(iter(SCRIPTS))
-    if "vista" not in st.session_state:
-        st.session_state["vista"] = "script"
 
-    if st.sidebar.button(
-        "⚙️ Configuración",
-        key="nav_configuracion",
-        type="primary" if st.session_state["vista"] == "config" else "secondary",
-        use_container_width=True,
-    ):
-        st.session_state["vista"] = "config"
-        st.rerun()
-
-    st.sidebar.divider()
     st.sidebar.title("Scripts")
     current_category = None
     for key, cfg in SCRIPTS.items():
         if cfg["category"] != current_category:
             current_category = cfg["category"]
             st.sidebar.markdown(f"**{current_category}**")
-        selected = st.session_state["vista"] == "script" and st.session_state["selected_script"] == key
+        selected = st.session_state["selected_script"] == key
         if st.sidebar.button(
             cfg["label"],
             key=f"nav_{key}",
@@ -804,27 +1274,17 @@ def render_sidebar_nav():
             use_container_width=True,
         ):
             st.session_state["selected_script"] = key
-            st.session_state["vista"] = "script"
             st.rerun()
 
 
 def main():
-    st.set_page_config(page_title="Tourplan NX - Herramientas", layout="centered")
-    st.title("Tourplan NX - Herramientas")
-    st.caption(
-        "Corre siempre contra producción. "
-        "Usuario/password de Tourplan se guardan localmente en esta PC (⚙️ Configuración) — "
-        "nunca se suben al repositorio ni se comparten con el resto del equipo."
-    )
-
-    render_aviso_pendientes()
+    st.set_page_config(page_title="Tourplan NX - Herramientas", layout="wide")
+    _inyectar_css()
+    _asegurar_pendientes_globales()
 
     render_sidebar_nav()
-    if st.session_state["vista"] == "config":
-        render_configuracion()
-    else:
-        selected_key = st.session_state["selected_script"]
-        render_script_tab(selected_key, SCRIPTS[selected_key])
+    selected_key = st.session_state["selected_script"]
+    render_script_tab(selected_key, SCRIPTS[selected_key])
 
 
 if __name__ == "__main__":
