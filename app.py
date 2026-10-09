@@ -903,130 +903,135 @@ def _render_panel_derecho(key, cfg, state, sheet_url):
 
 
 def _render_centro(key, cfg, state):
-    st.subheader(cfg["label"])
-    st.caption(cfg["help"])
+    # La fila título+botones se arma ACÁ (reserva el lugar arriba de
+    # todo), pero Ejecutar/Abortar recién se escriben más abajo, una vez
+    # calculado campos_completos (que depende de los widgets de adentro
+    # del expander) — Streamlit permite llenar una columna ya creada en
+    # cualquier momento posterior del script, no hace falta que el
+    # expander esté "antes" en el layout para estar antes en el código.
+    col_title, col_run, col_abort = st.columns([5, 1, 1])
+    with col_title:
+        st.subheader(cfg["label"])
+        st.caption(cfg["help"])
 
-    col_exp, col_run, col_abort = st.columns([5, 1, 1])
-
-    with col_exp:
-        with st.expander("Parámetros", expanded=not state["running"]):
-            col_sheet, col_refresh = st.columns([4, 1])
-            with col_sheet:
-                sheet_url = st.text_input(
-                    "URL del Google Sheet",
-                    value=user_config.sheet_url_default(key),
-                    key=f"sheet_url_{key}",
-                    disabled=state["running"],
-                    help="Se precarga con la URL guardada en Configuración para este script, si hay una. Siempre editable.",
-                )
-            with col_refresh:
-                st.markdown("<div style='height: 1.9em'></div>", unsafe_allow_html=True)
-                refrescar_clicked = st.button(
-                    "🔄 Refrescar",
-                    key=f"refrescar_{key}",
-                    disabled=state["running"] or not sheet_url,
-                    use_container_width=True,
-                    help="Lee el Sheet ahora y cuenta cuántas filas están Pendiente/OK/Error.",
-                )
-            if refrescar_clicked:
-                _refrescar_conteo(state, sheet_url, cfg["sheet"])
-                if cfg.get("sheet_resultados"):
-                    _refrescar_conteo_notas(state, sheet_url, cfg["sheet_resultados"])
-
-            base_url = st.text_input(
-                "URL de Tourplan",
-                value=cfg["base_url"],
-                key=f"url_{key}",
+    with st.expander("Parámetros", expanded=not state["running"]):
+        col_sheet, col_refresh = st.columns([4, 1])
+        with col_sheet:
+            sheet_url = st.text_input(
+                "URL del Google Sheet",
+                value=user_config.sheet_url_default(key),
+                key=f"sheet_url_{key}",
                 disabled=state["running"],
-                help="Viene precargada con producción. Cambiala solo si querés probar deliberadamente contra el ambiente de Test.",
+                help="Se precarga con la URL guardada en Configuración para este script, si hay una. Siempre editable.",
             )
+        with col_refresh:
+            st.markdown("<div style='height: 1.9em'></div>", unsafe_allow_html=True)
+            refrescar_clicked = st.button(
+                "🔄 Refrescar",
+                key=f"refrescar_{key}",
+                disabled=state["running"] or not sheet_url,
+                use_container_width=True,
+                help="Lee el Sheet ahora y cuenta cuántas filas están Pendiente/OK/Error.",
+            )
+        if refrescar_clicked:
+            _refrescar_conteo(state, sheet_url, cfg["sheet"])
+            if cfg.get("sheet_resultados"):
+                _refrescar_conteo_notas(state, sheet_url, cfg["sheet_resultados"])
 
-            modo_options = cfg.get("modo_options")
-            if modo_options:
-                modo_label = st.radio(
-                    "Modo",
-                    [label for label, _ in modo_options],
-                    key=f"modo_{key}",
-                    disabled=state["running"],
-                )
-                modo_env = dict(modo_options)[modo_label]
-            else:
-                st.info(cfg.get(
-                    "no_modo_info",
-                    "ℹ️ Este script no tiene modo de solo lectura: cada fila PENDIENTE se "
-                    "copia y linkea directo, sin vista previa antes de guardar.",
-                ))
-                modo_env = None
+        base_url = st.text_input(
+            "URL de Tourplan",
+            value=cfg["base_url"],
+            key=f"url_{key}",
+            disabled=state["running"],
+            help="Viene precargada con producción. Cambiala solo si querés probar deliberadamente contra el ambiente de Test.",
+        )
 
-            edicion_options = cfg.get("edicion_options")
-            if edicion_options:
-                edicion_label = st.radio(
-                    "Si el código de nota ya existe en el producto",
-                    [label for label, _ in edicion_options],
-                    key=f"edicion_{key}",
-                    disabled=state["running"],
-                )
-                edicion_env = dict(edicion_options)[edicion_label]
-            else:
-                edicion_env = None
+        modo_options = cfg.get("modo_options")
+        if modo_options:
+            modo_label = st.radio(
+                "Modo",
+                [label for label, _ in modo_options],
+                key=f"modo_{key}",
+                disabled=state["running"],
+            )
+            modo_env = dict(modo_options)[modo_label]
+        else:
+            st.info(cfg.get(
+                "no_modo_info",
+                "ℹ️ Este script no tiene modo de solo lectura: cada fila PENDIENTE se "
+                "copia y linkea directo, sin vista previa antes de guardar.",
+            ))
+            modo_env = None
 
-            eliminar_options = cfg.get("eliminar_options")
-            if eliminar_options:
-                eliminar_label = st.radio(
-                    "Acción sobre cada producto",
-                    [label for label, _ in eliminar_options],
-                    key=f"eliminar_{key}",
-                    disabled=state["running"],
-                )
-                eliminar_env = dict(eliminar_options)[eliminar_label]
-            else:
-                eliminar_env = None
+        edicion_options = cfg.get("edicion_options")
+        if edicion_options:
+            edicion_label = st.radio(
+                "Si el código de nota ya existe en el producto",
+                [label for label, _ in edicion_options],
+                key=f"edicion_{key}",
+                disabled=state["running"],
+            )
+            edicion_env = dict(edicion_options)[edicion_label]
+        else:
+            edicion_env = None
 
-            codigos_nota_env = None
-            if cfg.get("notas_a_exportar"):
-                # Paso 1 — buscador: familias (con variante de idioma) + códigos
-                # sueltos (sin idioma), todos al mismo nivel. Paso 2 — solo para
-                # las familias elegidas: checkboxes de idioma (pedido explícito
-                # de la usuaria: buscador en el paso 1, checkboxes en el paso 2).
-                items_paso1 = st.multiselect(
-                    "Qué notas exportar",
-                    options=list(FAMILIAS_NOTA.keys()) + list(CODIGOS_SUELTOS.keys()),
-                    key=f"notas_familias_{key}",
-                    disabled=state["running"],
-                    help="Elegí una o varias. Para las que tienen variante de idioma "
-                         "(Nota SRV, Descriptivo, Titulo, Luggage Waiver), después "
-                         "tildás abajo qué idiomas.",
-                )
-                codigos_a_exportar = []
-                for item in items_paso1:
-                    if item in FAMILIAS_NOTA:
-                        st.caption(f"**{item}** — idiomas:")
-                        idiomas = FAMILIAS_NOTA[item]
-                        cols = st.columns(len(idiomas))
-                        for col, idioma in zip(cols, idiomas):
-                            tildado = col.checkbox(
-                                idioma, value=True,
-                                key=f"notas_idioma_{key}_{item}_{idioma}",
-                                disabled=state["running"],
-                            )
-                            if tildado:
-                                codigos_a_exportar.append(idiomas[idioma])
-                    else:
-                        codigos_a_exportar.append(CODIGOS_SUELTOS[item])
-                codigos_nota_env = ",".join(codigos_a_exportar) if codigos_a_exportar else None
-                if items_paso1 and not codigos_nota_env:
-                    st.caption("⚠️ No queda ningún idioma tildado — destildá menos o elegí otra nota.")
-                # Se guarda en state para que el panel derecho (_render_tab_cola,
-                # que corre en otra columna/fragment) pueda calcular el
-                # progreso de notas sobre la selección vigente.
-                state["codigos_a_exportar"] = codigos_a_exportar
+        eliminar_options = cfg.get("eliminar_options")
+        if eliminar_options:
+            eliminar_label = st.radio(
+                "Acción sobre cada producto",
+                [label for label, _ in eliminar_options],
+                key=f"eliminar_{key}",
+                disabled=state["running"],
+            )
+            eliminar_env = dict(eliminar_options)[eliminar_label]
+        else:
+            eliminar_env = None
 
-            username, password = user_config.tp_credenciales_default()
-            if not (username and password):
-                st.warning(
-                    "Falta cargar tu usuario/contraseña de Tourplan en ⚙️ Configuración "
-                    "(se completan solos acá una vez guardados)."
-                )
+        codigos_nota_env = None
+        if cfg.get("notas_a_exportar"):
+            # Paso 1 — buscador: familias (con variante de idioma) + códigos
+            # sueltos (sin idioma), todos al mismo nivel. Paso 2 — solo para
+            # las familias elegidas: checkboxes de idioma (pedido explícito
+            # de la usuaria: buscador en el paso 1, checkboxes en el paso 2).
+            items_paso1 = st.multiselect(
+                "Qué notas exportar",
+                options=list(FAMILIAS_NOTA.keys()) + list(CODIGOS_SUELTOS.keys()),
+                key=f"notas_familias_{key}",
+                disabled=state["running"],
+                help="Elegí una o varias. Para las que tienen variante de idioma "
+                     "(Nota SRV, Descriptivo, Titulo, Luggage Waiver), después "
+                     "tildás abajo qué idiomas.",
+            )
+            codigos_a_exportar = []
+            for item in items_paso1:
+                if item in FAMILIAS_NOTA:
+                    st.caption(f"**{item}** — idiomas:")
+                    idiomas = FAMILIAS_NOTA[item]
+                    cols = st.columns(len(idiomas))
+                    for col, idioma in zip(cols, idiomas):
+                        tildado = col.checkbox(
+                            idioma, value=True,
+                            key=f"notas_idioma_{key}_{item}_{idioma}",
+                            disabled=state["running"],
+                        )
+                        if tildado:
+                            codigos_a_exportar.append(idiomas[idioma])
+                else:
+                    codigos_a_exportar.append(CODIGOS_SUELTOS[item])
+            codigos_nota_env = ",".join(codigos_a_exportar) if codigos_a_exportar else None
+            if items_paso1 and not codigos_nota_env:
+                st.caption("⚠️ No queda ningún idioma tildado — destildá menos o elegí otra nota.")
+            # Se guarda en state para que el panel derecho (_render_tab_cola,
+            # que corre en otra columna/fragment) pueda calcular el
+            # progreso de notas sobre la selección vigente.
+            state["codigos_a_exportar"] = codigos_a_exportar
+
+        username, password = user_config.tp_credenciales_default()
+        if not (username and password):
+            st.warning(
+                "Falta cargar tu usuario/contraseña de Tourplan en ⚙️ Configuración "
+                "(se completan solos acá una vez guardados)."
+            )
 
     campos_completos = bool(sheet_url and username and password and base_url)
     if cfg.get("notas_a_exportar"):
